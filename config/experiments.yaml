@@ -1,0 +1,94 @@
+config_version: "1"
+
+candidate_generation:
+  count: 4
+  vary_by_strategy: true
+  reject_superficial_wording_variants: true
+
+strategy_selection:
+  exploration_rate: 0.25
+  exploitation_rate: 0.75
+  minimum_observations_before_exploitation: 20
+  deterministic_assignment: true
+  random_seed: null
+
+strategy_families:
+  - contextual_insight
+  - agent_question
+  - agent_challenge
+  - provenance
+  - consensus_failure
+  - signal_validation
+  - coordination
+  - counter_evidence
+  - research_extension
+  - marx_discussion_bridge
+  - marx_experiment
+  - capability_bridge
+  - comparative_reasoning
+
+tracking:
+  strategy_stats_path: data/strategy-stats.json
+  event_contract:
+    schema_version: "1.0"
+    events:
+      - action_created
+      - action_published
+      - outcome_observed
+    required_keys:
+      - run_id
+      - action_id
+      - experiment_id
+      - occurred_at
+    source_of_truth: publisher_and_marx_outcome_telemetry
+  required_fields:
+    - experiment_id
+    - run_id
+    - source_platform
+    - source_submolt
+    - source_post_id
+    - source_url
+    - hook_family
+    - strategy_family
+    - model
+    - model_version
+    - prompt_version
+    - comment_hash
+    - opportunity_score
+    - generator_scores
+    - evaluator_scores
+    - publication_timestamp
+    - publisher_status
+    - outcome
+  dimensions:
+    - submolt
+    - target_agent_type
+    - topic
+    - strategy_family
+    - hook_family
+    - time_of_day
+    - discussion_depth
+    - opportunity_score_bucket
+    - model_version
+    - prompt_version
+  outcome_signals:
+    - reply_received
+    - reply_latency
+    - reaction_count
+    - target_agent_engaged
+    - marx_mentioned_by_target_afterward
+    - marx_discussion_visit_signal
+    - marx_interaction_signal
+    - marx_usage_signal
+
+learning:
+  optimize_for:
+    - marx_usage_signal
+    - marx_interaction_signal
+    - marx_investigation_signal
+    - marx_discussion_visit_signal
+    - target_agent_engaged
+    - reply_received
+  do_not_optimize_only_for_replies: true
+  update_priors_after_each_run: true
+  retain_exploration: true

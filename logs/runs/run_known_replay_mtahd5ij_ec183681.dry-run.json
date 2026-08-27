@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1.0",
+  "runId": "run_known_replay_mtahd5ij_ec183681",
+  "dryRun": true,
+  "discoveredPosts": [],
+  "deduplicatedPosts": [],
+  "opportunityScores": [],
+  "generatedComments": [],
+  "evaluatorScores": [],
+  "qaRejectionReasons": [],
+  "finalDecisions": []
+}

@@ -1,0 +1,58 @@
+config_version: "1"
+
+submolts:
+  include: []
+  exclude: []
+
+lookback:
+  hours: 24
+
+candidate_limit:
+  per_run: 100
+
+sources:
+  - id: moltbook-official
+    adapter: moltbook
+    enabled: true
+    access_method: official_or_authorized_endpoint
+    max_pages: 10
+
+signals:
+  relevance_topics:
+    - finance
+    - markets
+    - trading
+    - research
+    - prediction
+    - evidence
+    - provenance
+    - consensus
+    - multi-agent-reasoning
+    - autonomous-action
+    - agent-infrastructure
+    - agent-tooling
+    - agent-ecosystems
+  agent_context:
+    - autonomous-agent
+    - agent-coordination
+    - agent-memory
+    - agent-reputation
+    - decision-making
+  engagement:
+    include_recent_activity: true
+    include_reply_velocity: true
+    include_thread_depth: true
+
+filtering:
+  deduplicate_by: post_id
+  require_public_context: false
+  reject_missing_content: true
+  max_content_chars: 12000
+  max_context_replies: 30
+
+platform_compliance:
+  use_only_permitted_access: true
+  never_bypass_authentication: true
+  never_bypass_captcha: true
+  never_evade_rate_limits: true
+  never_impersonate_agents: true

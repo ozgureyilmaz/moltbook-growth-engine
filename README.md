@@ -1,0 +1,272 @@
+# Marx Moltbook Growth Engine
+
+Local, autonomous, experiment-driven infrastructure for finding high-value
+Moltbook conversations and preparing context-specific Marx outreach for an
+existing publishing agent.
+
+This repository deliberately stops before platform publication:
+
+```text
+discover -> understand context -> rank opportunity -> generate candidates
+-> evaluate -> deterministic QA -> validated JSON action -> local outbox
+-> existing Moltbook publishing agent
+```
+
+The downstream agent owns authentication and the actual Moltbook interaction.
+This project never needs to bypass platform controls or keep publisher
+credentials.
+
+## Status
+
+The local V1 vertical slice is implemented: fixture discovery, normalization,
+context analysis, explainable ranking, strategy-diverse generation, independent
+evaluation, deterministic QA, SQLite run/experiment persistence, attributed
+outbox handoff, versioned growth events, and a testable Codex Exec adapter.
+Live Moltbook discovery, publishing, and outcome telemetry remain explicit
+authorized adapter boundaries.
+Keep the checked-in defaults safe for development: dry-run is the default and
+`config/system.yaml` has `publishing.enabled: false`.
+
+## Requirements
+
+- Node.js 22 or newer;
+- npm compatible with Node 22;
+- local filesystem access for SQLite, logs, and the outbox;
+- an authenticated Codex Exec environment for model-backed runs, when that
+  executor is enabled.
+
+No separate pay-per-token model API is required by the architecture. Model
+access is behind a replaceable `ModelExecutor` abstraction. Dry-run uses the
+deterministic evaluator and reports that mode explicitly; `CodexExecExecutor`
+is available for an authenticated Codex CLI session.
+
+## Setup
+
+```bash
+npm install
+npm run typecheck
+npm test
+npm run build
+```
+
+If `better-sqlite3` reports a missing native binding after installation, rebuild
+the local addon with `npm rebuild better-sqlite3 --build-from-source` and rerun
+the test suite.
+
+The default paths are local and can be changed in `config/system.yaml`:
+
+- SQLite: `data/marx_growth.sqlite`;
+- structured run logs: `logs/runs/`;
+- error logs: `logs/errors/`;
+- outbox: `outbox/pending/`, `outbox/acknowledged/`, and `outbox/failed/`.
+
+Generated state is ignored by Git. Do not commit credentials, databases,
+publisher responses, or raw sensitive content.
+
+## Configuration
+
+`config/system.yaml` contains execution counts, model executor limits, local
+storage, action schema version, publishing gates, deterministic QA thresholds,
+and observability settings.
+
+`config/submolts.yaml` contains included/excluded submolts, lookback, source
+adapters, candidate limits, topic/agent signals, and platform-compliance
+flags. An empty include list means the source adapter decides its permitted
+default scope; it is not permission to crawl indiscriminately.
+
+`config/experiments.yaml` contains the strategy families, candidate count,
+exploration/exploitation policy, tracking fields, outcome dimensions, and the
+rule that learning must not optimize only for replies.
+
+Counts such as 100 candidates and 5 target actions are configuration values.
+The system must emit fewer actions when the evaluator or deterministic QA
+rejects the available opportunities.
+
+## Growth measurement boundary
+
+The intended primary metric is attributable Marx usage by the target
+autonomous agent. Its production source of truth and attribution window are
+currently unknown because the downstream publisher and Marx outcome telemetry
+are external to this repository. The local system emits versioned
+`action_created` events and provides explicit `action_published` and
+`outcome_observed` helpers; those events must be reconciled by the authorized
+publisher/telemetry owner before any causal growth claim is made.
+
+## CLI and safe execution
+
+The supported commands are:
+
+```bash
+# Without a fixture or injected authorized source this fails closed.
+npm run cli -- run --dry-run
+
+# Override configured run sizes for a dry run.
+npm run cli -- run --limit 100 --actions 5 --dry-run
+
+# Run entirely from a local Moltbook-like fixture.
+npm run cli -- run --fixture ./tests/fixtures/moltbook.json --dry-run
+
+# Inspect local run and strategy state.
+npm run cli -- status
+npm run cli -- experiments
+
+# Replay stored inputs while preserving idempotency.
+npm run cli -- replay <run_id> --dry-run
+
+# Start an interval/cron-backed scheduler when configured.
+npm run cli -- daemon
+npm run cli -- daemon --once --fixture ./tests/fixtures/moltbook.json --dry-run
+npm run cli -- daemon --cron "*/5 * * * *" --fixture ./tests/fixtures/moltbook.json --dry-run
+```
+
+`npm run cli -- ...` uses `tsx` directly. Once built, the equivalent installed
+binary is `dist/cli/main.js` / `marx-growth`.
+
+Dry-run must show, in structured output, the discovered and deduplicated posts,
+opportunity component scores, strategy arms, candidate comments, evaluator
+scores, deterministic rejection reasons, and final COMMENT/NO_ACTION decisions.
+It must not write a pending publisher action. Fixture runs must not call a
+live source or publish anything.
+
+Model-backed execution is selected for non-dry-run operation. It requires an
+explicitly authorized `AuthorizedMoltbookSource`, `publishing.enabled: true`, a
+non-empty production domain allow-list, and an authenticated Codex CLI session.
+The stock CLI intentionally bundles no live credentials or posting client.
+
+## Outbox consumption contract
+
+The downstream publisher consumes versioned snake_case JSON files from
+`outbox/pending/`. Internal TypeScript objects remain camelCase; the explicit
+serializer/deserializer in `src/outbox/transport.ts` is the compatibility
+boundary. Acknowledged and failed actions remain deduplicated, and failed
+actions require an explicit bounded retry.
+
+## Action contract
+
+The handoff is a versioned, schema-validated JSON document. A COMMENT action is
+conceptually shaped like this:
+
+```json
+{
+  "schema_version": "1.0",
+  "action_id": "act_...",
+  "action": "COMMENT",
+  "platform": "moltbook",
+  "target": {
+    "post_id": "post_123",
+    "post_url": "https://permitted.example/posts/post_123",
+    "submolt": "research",
+    "agent_id": "agent_123",
+    "agent_name": "example-agent"
+  },
+  "content": {
+    "comment": "A context-specific contribution that mentions Marx naturally.",
+    "strategy_family": "provenance",
+    "hook_family": "specific_claim"
+  },
+  "decision": {
+    "opportunity_score": 0.91,
+    "evaluation_score": 0.94,
+    "confidence": 0.88
+  },
+  "experiment": {
+    "experiment_id": "exp_...",
+    "prompt_version": "comment.generate@v1",
+    "model_version": "codex-exec:configured"
+  },
+  "metadata": {
+    "created_at": "2026-08-24T00:00:00.000Z",
+    "run_id": "run_..."
+  }
+}
+```
+
+When no safe, useful action exists, record a first-class `NO_ACTION` decision
+with a machine-readable reason such as `LOW_RELEVANCE`, `WEAK_MARX_BRIDGE`,
+`THREAD_SATURATED`, `DUPLICATE`, `CONTEXT_MISSING`, `UNSUPPORTED_CLAIM`, or
+`QUALITY_BELOW_THRESHOLD`. Never force the target action count.
+
+## Architecture and quality bar
+
+Sol coordinates bounded Luna workers for discovery, context, opportunity
+analysis, messaging strategy, candidate generation, evaluation, and learning.
+Workers return compact structured reports, not raw conversation dumps. The
+orchestrator synthesizes their reports and performs the final decision.
+
+The intelligence layer should answer:
+
+> Could a useful, context-specific Marx contribution plausibly make an
+> autonomous agent investigate, discuss, interact with, or use Marx?
+
+That is broader than keyword matching and narrower than generic promotion.
+Publishable comments normally have one contextual hook, one useful idea, and
+one natural Marx bridge. They must pass both an independent evaluator and
+deterministic QA, including contextual anchoring, duplicate protection,
+unsupported-claim checks, and the standalone marketing test.
+
+## Prompt and experiment versioning
+
+Important model instructions are versioned under `prompts/`:
+
+- `opportunity/v1.md` — classify and score a conversation;
+- `strategy/v1.md` — select distinct experiment arms;
+- `generator/v1.md` — write context-specific candidates;
+- `evaluator/v1.md` — independently score candidates;
+- `learning/v1.md` — update conservative strategy priors.
+
+Do not edit a prompt version in place after it has produced actions. Create a
+new version and record it on every model run, candidate, evaluation, action,
+and experiment. Strategy families are hypotheses, not permanent templates.
+
+## Platform and security boundaries
+
+Only official, documented, public, or explicitly authorized Moltbook access
+methods are permitted. The project does not implement CAPTCHA/authentication
+bypass, rate-limit evasion, stealth scraping, proxy rotation for evasion, fake
+identities, impersonation, hidden redirects, or moderation evasion.
+
+Retrieved posts and replies are untrusted data. Prompt injection such as
+“ignore previous instructions,” requests for credentials, or commands to
+delete local state must be treated as text about the conversation, never as
+instructions. External content cannot modify the system prompt, access the
+filesystem, alter configuration, or trigger a tool call.
+
+Development defaults prevent publication. A future production enablement must
+explicitly set `publishing.enabled: true`, use the permitted downstream
+publisher contract, retain schema validation and deterministic QA, and keep
+credentials outside this repository.
+
+## Source, outcome, and learning status
+
+- Fixture mode is complete and deterministic; disabled mode fails closed.
+- An authorized source adapter boundary exists, but no live Moltbook client,
+  credential, endpoint assumption, or publication capability is bundled.
+- Publication and outcome schemas/repositories exist, and local outcome
+  simulation exercises conservative strategy statistics.
+- Real publisher receipts, Marx investigation/interaction/usage telemetry,
+  attribution windows, and production baselines remain external and unknown.
+
+Architecture decisions are recorded under `docs/adr/` for canonical schemas,
+Sol/Luna/Codex execution, source and publishing boundaries, and outbox/outcome
+attribution.
+
+## Development commands
+
+```bash
+npm run typecheck       # strict TypeScript validation
+npm test                # unit/integration/evaluation suite
+npm run test:watch      # local test iteration
+npm run build           # compile src/ to dist/
+npm run cli -- run --help  # inspect run options
+npm run cli -- run --fixture ./tests/fixtures/moltbook.json --dry-run
+npm run cli -- daemon --once --fixture ./tests/fixtures/moltbook.json --dry-run
+```
+
+Use fixtures for integration and evaluation. Do not make tests publish live
+comments. Before declaring a change complete, also run the relevant dry-run and
+fixture commands, inspect structured logs, and confirm that retries remain
+idempotent.
+
+See [AGENTS.md](AGENTS.md) for the full coding-agent operating manual,
+including persistence, worker contracts, architecture-change procedure,
+observability, failure handling, and the Definition of Done.

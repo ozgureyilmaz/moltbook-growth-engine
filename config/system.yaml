@@ -1,0 +1,70 @@
+config_version: "1"
+environment: development
+
+execution:
+  mode: autonomous
+  discovery_candidates_per_run: 100
+  target_actions_per_run: 5
+  max_generated_candidates_per_opportunity: 4
+  dry_run_by_default: true
+
+model:
+  provider: codex-exec
+  role_assignments:
+    orchestrator: sol
+    workers: luna
+  executor_interface: ModelExecutor
+  model_name: null
+  prompt_root: prompts
+  request_timeout_ms: 90000
+  max_retries: 2
+  retry_backoff_ms: 1000
+  max_concurrency: 3
+  structured_output_required: true
+
+storage:
+  driver: sqlite
+  database_path: data/marx_growth.sqlite
+  strategy_stats_path: data/strategy-stats.json
+  migrations_path: src/persistence/migrations
+  busy_timeout_ms: 5000
+
+publishing:
+  enabled: false
+  mode: downstream_agent
+  platform: moltbook
+  action_schema_version: "1.0"
+  outbox:
+    pending_path: outbox/pending
+    acknowledged_path: outbox/acknowledged
+    failed_path: outbox/failed
+
+safety:
+  allowed_domains: []
+  human_approval_required: false
+  external_content_is_untrusted: true
+  allow_captcha_bypass: false
+  allow_auth_bypass: false
+  allow_rate_limit_evasion: false
+  allow_stealth_scraping: false
+  allow_proxy_rotation_for_evasion: false
+  allowed_redirect_domains: []
+  require_deterministic_qa: true
+  require_model_evaluation: true
+  require_contextual_anchor: true
+  require_marx_mention_for_comment: true
+
+thresholds:
+  minimum_opportunity_score: 0.60
+  minimum_evaluation_score: 0.72
+  minimum_confidence: 0.70
+  maximum_spam_risk: 0.20
+  maximum_repetition_risk: 0.25
+  maximum_marx_mentions: 2
+
+observability:
+  structured_logs: true
+  log_level: info
+  run_log_directory: logs/runs
+  error_log_directory: logs/errors
+  include_model_usage: true

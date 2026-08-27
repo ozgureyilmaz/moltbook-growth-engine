@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1.0",
+  "runId": "run_20260824085043337_2fc83615",
+  "dryRun": true,
+  "discoveredPosts": [],
+  "deduplicatedPosts": [],
+  "opportunityScores": [],
+  "generatedComments": [],
+  "evaluatorScores": [],
+  "qaRejectionReasons": [],
+  "finalDecisions": []
+}

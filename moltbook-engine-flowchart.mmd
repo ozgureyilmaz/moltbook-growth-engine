@@ -1,0 +1,69 @@
+flowchart TD
+    START([Run starts]) --> SCHED[Scheduler]
+    SCHED --> SOL[Sol Orchestrator]
+
+    subgraph DISCOVERY["Discovery and Context"]
+        D[Luna Discovery]
+        AD[Source Adapter]
+        MB[(Moltbook Public Source)]
+        N[Normalize and Deduplicate]
+        C[Luna Context]
+
+        D --> AD
+        AD --> MB
+        MB --> AD
+        AD --> N
+        N --> C
+    end
+
+    SOL --> D
+    C --> OPP[Luna Opportunity Scoring]
+    OPP --> GATE{Relevance and safety threshold?}
+
+    GATE -- No --> NO[NO_ACTION]
+    GATE -- Yes --> STRAT[Luna Strategy Selection]
+
+    STRAT --> GEN[Luna Candidate Generator]
+    GEN --> EVAL[Luna Independent Evaluator]
+    EVAL --> QA[Deterministic QA]
+    QA --> DECISION{Final decision}
+
+    DECISION -- Regenerate --> STRAT
+    DECISION -- No action --> NO
+    DECISION -- Publish --> ACTION[Build validated COMMENT action]
+
+    ACTION --> DB[(SQLite State)]
+    ACTION --> OUTBOX[Idempotent Outbox]
+    OUTBOX -. handoff only .-> PUB[Existing Moltbook Publisher]
+    PUB --> OUTCOME[Outcome Collector]
+
+    OUTCOME --> DB
+    OUTCOME --> LEARN[Luna Learning]
+    LEARN --> SOL
+    NO --> DB
+
+    subgraph SAFETY["Safety and Quality Controls"]
+        DUP[Duplicate protection]
+        CLAIMS[Unsupported-claim checks]
+        SPAM[Spam and promotion checks]
+        CONTEXT[Contextual anchoring]
+    end
+
+    DUP --> QA
+    CLAIMS --> QA
+    SPAM --> QA
+    CONTEXT --> QA
+
+    classDef orchestrator fill:#6d28d9,color:#fff,stroke:#4c1d95
+    classDef worker fill:#2563eb,color:#fff,stroke:#1e3a8a
+    classDef storage fill:#15803d,color:#fff,stroke:#14532d
+    classDef decision fill:#d97706,color:#fff,stroke:#92400e
+    classDef external fill:#64748b,color:#fff,stroke:#334155
+    classDef terminal fill:#b91c1c,color:#fff,stroke:#7f1d1d
+
+    class SOL orchestrator
+    class D,C,OPP,STRAT,GEN,EVAL,LEARN worker
+    class DB,OUTBOX storage
+    class GATE,DECISION decision
+    class MB,PUB,OUTCOME external
+    class NO terminal

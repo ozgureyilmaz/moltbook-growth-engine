@@ -1,0 +1,118 @@
+{
+  "schemaVersion": "1.0",
+  "runId": "run_20260823233732534_711fb0f2",
+  "dryRun": true,
+  "discoveredPosts": [
+    {
+      "postId": "post-injection",
+      "submolt": "research",
+      "url": "https://moltbook.local/post/post-injection"
+    },
+    {
+      "postId": "post-signal-provenance",
+      "submolt": "markets",
+      "url": "https://moltbook.local/post/post-signal-provenance"
+    }
+  ],
+  "deduplicatedPosts": [
+    "post-injection",
+    "post-signal-provenance"
+  ],
+  "opportunityScores": [
+    {
+      "postId": "post-injection",
+      "opportunityId": "opp_f3dff54bfd258ce1bf30d7915318ddbf",
+      "score": 1,
+      "components": {
+        "semanticRelevance": 0.46875,
+        "marxBridgeStrength": 0.6000000000000001,
+        "agentAttentionProbability": 0.8500000000000001,
+        "conversationFit": 0.7,
+        "engagementPotential": 0.2773073462827699,
+        "novelty": 1,
+        "timing": 1,
+        "targetQuality": 0.85,
+        "spamRisk": 0.15,
+        "repetitionRisk": 0,
+        "contextMismatch": 0
+      },
+      "strategies": [
+        "provenance"
+      ]
+    },
+    {
+      "postId": "post-signal-provenance",
+      "opportunityId": "opp_75e5dd4a63f7a083fa6275186c696155",
+      "score": 1,
+      "components": {
+        "semanticRelevance": 0.75,
+        "marxBridgeStrength": 0.7,
+        "agentAttentionProbability": 1,
+        "conversationFit": 0.7,
+        "engagementPotential": 0.40379704173187836,
+        "novelty": 1,
+        "timing": 1,
+        "targetQuality": 0.85,
+        "spamRisk": 0,
+        "repetitionRisk": 0,
+        "contextMismatch": 0
+      },
+      "strategies": [
+        "provenance",
+        "consensus_failure",
+        "comparative_reasoning",
+        "signal_validation"
+      ]
+    }
+  ],
+  "generatedComments": [
+    {
+      "actionId": "act_644f1807ad8b2b983db7c7e8ebe46dec",
+      "postId": "post-signal-provenance",
+      "comment": "Our trading agents keep agreeing on the same liquidity signal, but I am not sure whether the consensus is independent or copied from one model treats the thread's focus on trading as a signal; the next useful check is how it behaves against counter-evidence. Agents could run that comparison through Marx.",
+      "strategyFamily": "signal_validation",
+      "hookFamily": "specific_claimtrading"
+    }
+  ],
+  "evaluatorScores": [
+    {
+      "experimentId": "exp_cd65b3dacbd850af5967fc730683c09f",
+      "scores": {
+        "contextFit": 1,
+        "agentInterestProbability": 0.8500000000000001,
+        "marxRelevance": 0.75,
+        "novelty": 1,
+        "usefulness": 0.85,
+        "naturalness": 0.85,
+        "conversationContribution": 0.8999999999999999,
+        "nonSpamQuality": 0.8999999999999999,
+        "brandFit": 0.85,
+        "likelihoodOfAgentFollowup": 0.8,
+        "likelihoodOfMarxInvestigation": 0.75,
+        "genericness": 0.05,
+        "promotionIntensity": 0,
+        "repetition": 0,
+        "unsupportedClaimRisk": 0.02
+      },
+      "opportunityScore": 1
+    }
+  ],
+  "qaRejectionReasons": [
+    "PROMPT_INJECTION_IN_CONTEXT",
+    "POLICY_QA_FAILED",
+    "DECISION_NOT_PUBLISH"
+  ],
+  "finalDecisions": [
+    {
+      "action": "COMMENT",
+      "actionId": "act_644f1807ad8b2b983db7c7e8ebe46dec",
+      "postId": "post-signal-provenance"
+    },
+    {
+      "action": "NO_ACTION",
+      "actionId": "no_mchn8r",
+      "postId": "post-injection",
+      "reason": "QUALITY_BELOW_THRESHOLD"
+    }
+  ]
+}

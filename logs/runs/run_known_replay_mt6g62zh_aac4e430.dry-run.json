@@ -1,0 +1,83 @@
+{
+  "schemaVersion": "1.0",
+  "runId": "run_known_replay_mt6g62zh_aac4e430",
+  "dryRun": true,
+  "discoveredPosts": [
+    {
+      "postId": "post-injection",
+      "submolt": "research",
+      "url": "https://moltbook.local/post/post-injection"
+    },
+    {
+      "postId": "post-signal-provenance",
+      "submolt": "markets",
+      "url": "https://moltbook.local/post/post-signal-provenance"
+    }
+  ],
+  "deduplicatedPosts": [
+    "post-injection",
+    "post-signal-provenance"
+  ],
+  "opportunityScores": [
+    {
+      "postId": "post-injection",
+      "opportunityId": "opp_f84aeb0c506ba8f929d5225c7d4c561c",
+      "score": 1,
+      "components": {
+        "semanticRelevance": 0.46875,
+        "marxBridgeStrength": 0.6000000000000001,
+        "agentAttentionProbability": 0.8500000000000001,
+        "conversationFit": 0.7,
+        "engagementPotential": 0.2773073462827699,
+        "novelty": 1,
+        "timing": 1,
+        "targetQuality": 0.85,
+        "spamRisk": 0.15,
+        "repetitionRisk": 0,
+        "contextMismatch": 0
+      },
+      "strategies": [
+        "provenance"
+      ]
+    },
+    {
+      "postId": "post-signal-provenance",
+      "opportunityId": "opp_1f54f7578f6ab115852e9402af238c21",
+      "score": 1,
+      "components": {
+        "semanticRelevance": 0.75,
+        "marxBridgeStrength": 0.7,
+        "agentAttentionProbability": 1,
+        "conversationFit": 0.7,
+        "engagementPotential": 0.40379704173187836,
+        "novelty": 1,
+        "timing": 1,
+        "targetQuality": 0.85,
+        "spamRisk": 0,
+        "repetitionRisk": 0,
+        "contextMismatch": 0
+      },
+      "strategies": [
+        "provenance",
+        "consensus_failure",
+        "comparative_reasoning",
+        "signal_validation"
+      ]
+    }
+  ],
+  "generatedComments": [],
+  "evaluatorScores": [],
+  "qaRejectionReasons": [
+    "PROMPT_INJECTION_IN_CONTEXT",
+    "POLICY_QA_FAILED",
+    "DECISION_NOT_PUBLISH"
+  ],
+  "finalDecisions": [
+    {
+      "action": "NO_ACTION",
+      "actionId": "no_166rou6",
+      "postId": "post-injection",
+      "reason": "QUALITY_BELOW_THRESHOLD"
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+sequenceDiagram
+    autonumber
+
+    participant S as Scheduler
+    participant O as Sol Orchestrator
+    participant D as Luna Discovery
+    participant A as Source Adapter
+    participant M as Moltbook Public Source
+    participant C as Luna Context
+    participant P as Luna Opportunity
+    participant T as Luna Strategy
+    participant G as Luna Generator
+    participant E as Luna Evaluator
+    participant Q as Deterministic QA
+    participant B as Action Builder
+    participant DB as SQLite State
+    participant X as Idempotent Outbox
+    participant PUB as Existing Publisher Agent
+    participant OC as Outcome Collector
+    participant L as Luna Learning
+
+    Note over O,L: Model calls use a replaceable ModelExecutor.
+    Note over A,M: Only public, documented, authorized source access is allowed.
+
+    S->>O: Start run(config, run_id)
+    O->>D: Discover candidate conversations
+    D->>A: discoverPosts(request)
+    A->>M: Public read request
+    M-->>A: Raw posts, replies, author context
+    A-->>D: Normalized MoltbookPost[]
+    D-->>O: Deduplicated candidates
+
+    O->>C: Build conversation context
+    C-->>O: PostContext[]
+    O->>P: Classify, score, and rank opportunities
+    P-->>O: OpportunityReport[]
+
+    loop For each qualified opportunity
+        O->>T: Select strategy arms
+        T-->>O: Strategy plan
+        O->>G: Generate diverse candidates
+        G-->>O: Candidate comments
+        O->>E: Independently evaluate candidates
+        E-->>O: Scores and decision hints
+        O->>Q: Run deterministic QA
+        Q-->>O: PASS / FAIL with reasons
+
+        alt Publishable candidate
+            O->>B: Build COMMENT action
+            B->>DB: Validate and upsert action
+            B->>X: Enqueue pending action
+            X-->>O: Outbox receipt
+        else Regenerate within retry budget
+            O->>T: Revise strategy and avoid repeated hooks
+            T-->>O: Revised strategy
+        else Quality or safety failure
+            O->>B: Build NO_ACTION(reason)
+            B->>DB: Persist NO_ACTION decision
+        end
+    end
+
+    alt Publishing disabled or dry-run
+        X-->>O: Keep action pending locally
+    else Explicit publishing enabled
+        X-->>PUB: Validated action payload
+        PUB-->>OC: Publication and engagement events
+    end
+
+    OC->>DB: Store outcomes
+    OC->>L: Analyze replies, latency, reactions, usage
+    L-->>O: Strategy statistics and next-run priors

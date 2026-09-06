@@ -4,7 +4,10 @@ import { fixturePost, FixtureMoltbookSource } from "../../src/discovery";
 import { scoreOpportunity } from "../../src/analysis";
 import { generateCandidates } from "../../src/generation";
 import { IndependentMockEvaluator, finalDecision } from "../../src/evaluation";
-import { ExperimentEngine, makeExperimentRecord, updateExperimentOutcome } from "../../src/experiments";
+import { ExperimentEngine, makeExperimentRecord, StrategyStatsStore, updateExperimentOutcome } from "../../src/experiments";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { learnStrategyPriors } from "../../src/strategy";
 import type { ExperimentRecord } from "../../src/orchestrator";
 
@@ -98,6 +101,7 @@ describe("decision and learning contracts", () => {
 
   it("learns only from declared Marx investigation, interaction, and usage signals", () => {
     const priors = learnStrategyPriors([
+      { strategyFamily: "provenance" },
       { strategyFamily: "provenance", outcome: { targetAgentEngaged: true, replyReceived: true } },
       { strategyFamily: "provenance", outcome: { marxInvestigationSignal: true } },
       { strategyFamily: "provenance", outcome: { marxInteractionSignal: true } },
@@ -146,5 +150,21 @@ describe("decision and learning contracts", () => {
     };
     const engine = new ExperimentEngine([record]);
     expect(engine.all()[0]).toMatchObject({ runId: "run-legacy", sourcePostId: "post-legacy" });
+  });
+
+  it("rebuilds strategy statistics idempotently from durable outcomes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "moltbook-strategy-stats-"));
+    try {
+      const { context, opportunity, candidate } = await decisionFixture();
+      const evaluation = await new IndependentMockEvaluator().evaluate(candidate, context);
+      const experiment = { ...makeExperimentRecord("run-stats", opportunity, candidate, evaluation), outcome: { marxUsageSignal: true } };
+      const store = new StrategyStatsStore(join(root, "stats.json"));
+      await store.replaceExperiments([{ experiment }]);
+      await store.replaceExperiments([{ experiment }]);
+      expect((await store.load())[0]).toMatchObject({ trials: 1, northStarSuccesses: 1 });
+      await rm(root, { recursive: true, force: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

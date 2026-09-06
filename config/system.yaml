@@ -22,6 +22,16 @@ model:
   max_concurrency: 3
   structured_output_required: true
 
+source:
+  mode: authorized_autonomous
+  api_base_url: https://www.moltbook.com/api/v1
+  secret_provider: macos-keychain
+  api_key_environment_variable: MOLTBOOK_API_KEY
+  keychain_service: marx-moltbook-growth-engine
+  keychain_account: moltbook-read-client
+  request_timeout_ms: 15000
+  max_pages: 4
+
 storage:
   driver: sqlite
   database_path: data/marx_growth.sqlite
@@ -30,7 +40,7 @@ storage:
   busy_timeout_ms: 5000
 
 publishing:
-  enabled: false
+  enabled: true
   mode: downstream_agent
   platform: moltbook
   action_schema_version: "1.0"
@@ -39,8 +49,31 @@ publishing:
     acknowledged_path: outbox/acknowledged
     failed_path: outbox/failed
 
+publisher_bridge:
+  enabled: true
+  type: hermes_outbox
+  binary: hermes
+  provider: openai-codex
+  model: gpt-5.6-luna
+  reasoning_effort: xhigh
+  handoff_path: outbox/handoff
+  contract_secret_provider: macos-keychain
+  contract_keychain_service: marx-moltbook-growth-engine
+  contract_keychain_account: publisher-contract
+  contract_key_id: contract-v1
+
+operations:
+  runtime_directory: data/runtime
+  supervisor_lock_path: data/runtime/supervisor.lock.json
+  heartbeat_path: data/runtime/heartbeat.json
+  kill_switch_path: data/runtime/kill-switch.json
+  kill_switch_audit_path: data/runtime/kill-switch.audit.jsonl
+  # Proposed local default; confirm against the final daemon cadence.
+  heartbeat_stale_after_ms: 900000
+
 safety:
-  allowed_domains: []
+  allowed_domains:
+    - www.moltbook.com
   human_approval_required: false
   external_content_is_untrusted: true
   allow_captcha_bypass: false

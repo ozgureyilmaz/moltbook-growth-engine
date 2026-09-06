@@ -289,7 +289,8 @@ export function fenceUntrustedData(value: unknown): string {
   } catch {
     serialized = JSON.stringify(String(value));
   }
-  return `<untrusted-data>\n${serialized}\n</untrusted-data>`;
+  // Prevent external strings from manufacturing the closing delimiter.
+  return `<untrusted-data>\n${serialized.replaceAll("<", "\\u003c")}\n</untrusted-data>`;
 }
 
 /** Alias useful to callers that want to make the test-only nature explicit. */

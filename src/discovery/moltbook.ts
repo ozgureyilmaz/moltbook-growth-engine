@@ -1,6 +1,8 @@
 import { analyzeUntrustedText } from "../security";
 import type { DiscoveryRequest, MoltbookPost, PostContext, PostReply } from "../orchestrator/contracts";
 import { normalizePost } from "./normalize";
+import { isRetryableMoltbookError, MoltbookHttpError } from "./http-client";
+import { MoltbookPostSchema, PostReplySchema } from "../schemas";
 
 export interface MoltbookSource {
   discoverPosts(input: DiscoveryRequest): Promise<MoltbookPost[]>;
@@ -90,7 +92,7 @@ function hostAllowed(urlValue: string, domains: string[]): boolean {
   } catch {
     return false;
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  if (url.protocol !== "https:" || url.username || url.password) return false;
   return domains.some((domain) => {
     const normalized = domain.toLowerCase().replace(/^\.+/, "");
     return url.hostname.toLowerCase() === normalized || url.hostname.toLowerCase().endsWith(`.${normalized}`);
@@ -104,8 +106,10 @@ function cloneReply(reply: PostReply): PostReply {
 function normalizeContext(value: unknown, fallbackPost: MoltbookPost, fetchedAt = nowIso()): PostContext {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Authorized Moltbook context must be an object");
   const raw = value as Partial<PostContext>;
-  const post = raw.post ? normalizePostSafely(raw.post, fetchedAt) : fallbackPost;
-  const replies = Array.isArray(raw.replies) ? raw.replies.filter((reply): reply is PostReply => Boolean(reply && typeof reply === "object")).map((reply) => cloneReply(reply)) : [];
+  const post = raw.post ? normalizePostSafely(raw.post, fetchedAt) : MoltbookPostSchema.parse(fallbackPost);
+  const replies = Array.isArray(raw.replies)
+    ? raw.replies.filter((reply): reply is PostReply => Boolean(reply && typeof reply === "object")).map((reply) => PostReplySchema.parse(cloneReply(reply)))
+    : [];
   return {
     post,
     parent: raw.parent ? normalizePostSafely(raw.parent, fetchedAt) : undefined,
@@ -149,7 +153,7 @@ export class AuthorizedMoltbookSource implements MoltbookSource {
       : await this.withRetry(() => this.client.discoverPosts(input));
     if (!Array.isArray(rawPosts)) throw new Error("Authorized Moltbook discovery returned a non-array");
     return rawPosts.map((raw) => {
-      const post = normalizePost(raw as Parameters<typeof normalizePost>[0]);
+      const post = MoltbookPostSchema.parse(normalizePost(raw as Parameters<typeof normalizePost>[0]));
       if (!hostAllowed(post.url, this.allowedDomains)) throw new Error(`Moltbook post URL is outside the configured allowlist: ${post.postId}`);
       return post;
     });
@@ -161,6 +165,7 @@ export class AuthorizedMoltbookSource implements MoltbookSource {
     const value = raw as Partial<PostContext>;
     const post = value.post ? normalizePost(value.post, nowIso()) : undefined;
     if (!post) throw new Error(`Authorized Moltbook context is missing its post for ${postId}`);
+    if (post.postId !== postId) throw new Error(`Authorized Moltbook context post ID does not match requested post ${postId}`);
     if (!hostAllowed(post.url, this.allowedDomains)) throw new Error(`Moltbook context URL is outside the configured allowlist: ${postId}`);
     const context = normalizeContext(value, post);
     if (context.parent && !hostAllowed(context.parent.url, this.allowedDomains)) throw new Error(`Moltbook parent URL is outside the configured allowlist: ${postId}`);
@@ -170,7 +175,10 @@ export class AuthorizedMoltbookSource implements MoltbookSource {
   private async collectPages(input: DiscoveryRequest): Promise<unknown[]> {
     const posts: unknown[] = [];
     let cursor: string | undefined;
+    const seenCursors = new Set<string>();
     for (let page = 0; page < this.maxPages && posts.length < (input.limit ?? 100); page += 1) {
+      if (cursor && seenCursors.has(cursor)) throw new Error("Authorized Moltbook pagination cursor repeated");
+      if (cursor) seenCursors.add(cursor);
       const response = await this.withRetry(() => this.client.discoverPostPage!(input, cursor));
       if (!Array.isArray(response.posts)) throw new Error("Authorized Moltbook page returned a non-array posts value");
       posts.push(...response.posts);
@@ -185,7 +193,11 @@ export class AuthorizedMoltbookSource implements MoltbookSource {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       try { return await operation(); } catch (error) {
         lastError = error;
-        if (attempt < this.maxAttempts && this.retryBackoffMs > 0) await new Promise((resolve) => setTimeout(resolve, this.retryBackoffMs));
+        if (!isRetryableMoltbookError(error) || attempt >= this.maxAttempts) break;
+        const waitMs = error instanceof MoltbookHttpError && error.retryAfterMs !== undefined
+          ? Math.max(this.retryBackoffMs, error.retryAfterMs)
+          : this.retryBackoffMs;
+        if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
       }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));

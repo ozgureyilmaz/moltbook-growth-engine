@@ -3,18 +3,19 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { applyMigrations } from "./migrations";
 import { jsonText, type SqliteDatabase, withTransaction } from "./database";
-import { deterministicId, normalizeText, sha256 } from "../domain/identifiers";
+import { deterministicId, normalizeText, sha256, stableStringify } from "../domain/identifiers";
 import {
   adaptAction,
   adaptCandidate,
   adaptContext,
   adaptEvaluation,
   adaptExperiment,
+  adaptOutcomeEvent,
   adaptOpportunity,
   adaptPost,
   adaptRun,
 } from "./adapters";
-import { ActionSchema, AgentSchema, ExperimentSchema, ModelRunRecordSchema, MoltbookPostSchema, OutcomeSchema, PublicationSchema, RunSummarySchema, StrategyStatisticsSchema, WorkerReportSchema, validateActionSecurity, type Action, type ModelRunRecord, type Outcome, type PostContext, type Publication, type StrategyStatistics } from "../schemas";
+import { ActionSchema, AgentSchema, ExperimentSchema, MarxOutcomeEventSchema, ModelRunRecordSchema, MoltbookPostSchema, OutcomeSchema, PublicationSchema, RunSummarySchema, StrategyStatisticsSchema, WorkerReportSchema, validateActionSecurity, type Action, type MarxOutcomeEvent, type ModelRunRecord, type Outcome, type PostContext, type Publication, type StrategyStatistics } from "../schemas";
 import type { ActionSecurityOptions } from "../schemas";
 import type {
   ActionPayload,
@@ -247,6 +248,12 @@ export class SqliteRuntimePersistence implements PersistenceLike {
       .map((row) => { try { return JSON.parse(row.action_json ?? "{}").content?.comment as string; } catch { return ""; } }).filter(Boolean);
   }
 
+  public getAction(actionId: string): ActionPayload | NoActionDecision | undefined {
+    const row = this.db.prepare("SELECT action_json FROM actions WHERE action_id = ?").get<{ action_json?: string }>(actionId);
+    if (!row?.action_json) return undefined;
+    return ActionSchema.parse(JSON.parse(row.action_json)) as ActionPayload | NoActionDecision;
+  }
+
   public getExperiments(): ExperimentRecord[] {
     const durableOutcomes = new Map(
       this.db.prepare("SELECT experiment_id, outcome_json FROM outcomes").all<{ experiment_id: string; outcome_json: string }>()
@@ -331,6 +338,19 @@ export class SqliteRuntimePersistence implements PersistenceLike {
 
   public savePublication(publication: Publication): void {
     const parsed = PublicationSchema.parse(publication);
+    const existing = this.db.prepare("SELECT publication_json FROM publications WHERE action_id = ?").get<{ publication_json: string }>(parsed.actionId);
+    if (existing) {
+      const prior = PublicationSchema.parse(JSON.parse(existing.publication_json) as unknown);
+      if (prior.status === "published" && parsed.status !== "published") throw new Error(`publication ${parsed.actionId} cannot regress from published`);
+      if (prior.status === "published" && prior.publicationId !== parsed.publicationId) throw new Error(`publication ${parsed.actionId} already has a different receipt`);
+      if (prior.publicationId !== parsed.publicationId && parsed.status !== "published") throw new Error(`publication ${parsed.actionId} already has a different terminal receipt`);
+      if (prior.publicationId !== parsed.publicationId && prior.status !== "published" && parsed.status === "published") {
+        this.db.prepare(`UPDATE publications SET publication_id = ?, experiment_id = ?, status = ?, publication_json = ?, acknowledged_at = ?, error_message = ? WHERE action_id = ?`).run(
+          parsed.publicationId, parsed.experimentId ?? null, parsed.status, jsonText(parsed), parsed.acknowledgedAt ?? null, parsed.errorMessage ?? null, parsed.actionId,
+        );
+        return;
+      }
+    }
     this.db.prepare(`INSERT INTO publications (publication_id, action_id, experiment_id, status, publication_json, created_at, acknowledged_at, error_message)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(publication_id) DO UPDATE SET status=excluded.status,
       publication_json=excluded.publication_json, acknowledged_at=excluded.acknowledged_at, error_message=excluded.error_message`).run(
@@ -340,11 +360,57 @@ export class SqliteRuntimePersistence implements PersistenceLike {
 
   public saveOutcome(outcome: Outcome): void {
     const parsed = OutcomeSchema.parse(outcome);
+    const actionId = typeof parsed.metadata?.actionId === "string" ? parsed.metadata.actionId : undefined;
+    const sourcePostId = typeof parsed.metadata?.sourcePostId === "string" ? parsed.metadata.sourcePostId : undefined;
+    if (!actionId || !sourcePostId || parsed.metadata?.evidenceStatus !== "verified") {
+      throw new Error("durable outcomes require verified publication-bound attribution metadata");
+    }
+    const publication = this.getPublicationByActionId(actionId);
+    if (!publication || publication.status !== "published" || publication.experimentId !== parsed.experimentId) {
+      throw new Error(`outcome ${parsed.outcomeId} requires a matching published receipt`);
+    }
+    if (publication.metadata?.evidenceStatus !== "verified" || publication.metadata?.targetPostId !== sourcePostId) {
+      throw new Error(`outcome ${parsed.outcomeId} publication evidence does not match its source post`);
+    }
+    if (!publication.acknowledgedAt || Date.parse(parsed.observedAt) < Date.parse(publication.acknowledgedAt)) {
+      throw new Error(`outcome ${parsed.outcomeId} must be observed after verified publication`);
+    }
     this.db.prepare(`INSERT INTO outcomes (outcome_id, experiment_id, run_id, outcome_json, observed_at)
       VALUES (?, ?, ?, ?, ?) ON CONFLICT(experiment_id) DO UPDATE SET outcome_id=excluded.outcome_id,
       run_id=excluded.run_id, outcome_json=excluded.outcome_json, observed_at=excluded.observed_at`).run(
       parsed.outcomeId, parsed.experimentId, parsed.runId, jsonText(parsed), parsed.observedAt,
     );
+  }
+
+  public saveOutcomeEvent(event: MarxOutcomeEvent): void {
+    const parsed = adaptOutcomeEvent(event);
+    const existing = this.db.prepare("SELECT event_json FROM outcome_events WHERE event_id = ?").get<{ event_json: string }>(parsed.eventId);
+    if (existing && stableStringify(JSON.parse(existing.event_json)) !== stableStringify(parsed)) throw new Error(`outcome event ${parsed.eventId} is immutable`);
+    if (existing) return;
+    const evidenceKey = parsed.evidenceStatus === "verified"
+      ? sha256(stableStringify({ source: parsed.source, eventType: parsed.eventType, evidenceId: parsed.evidenceId }))
+      : null;
+    if (evidenceKey) {
+      const priorEvidence = this.db.prepare("SELECT event_id FROM outcome_events WHERE evidence_key = ?").get<{ event_id: string }>(evidenceKey);
+      if (priorEvidence) throw new Error(`verified outcome evidence is already attributed to event ${priorEvidence.event_id}`);
+    }
+    this.db.prepare(`INSERT INTO outcome_events
+      (event_id, action_id, experiment_id, run_id, event_type, evidence_status, event_json, occurred_at, observed_at, evidence_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.eventId, parsed.actionId, parsed.experimentId, parsed.runId, parsed.eventType, parsed.evidenceStatus,
+      jsonText(parsed), parsed.occurredAt, parsed.observedAt, evidenceKey,
+    );
+  }
+
+  public listOutcomeEvents(experimentId: string): MarxOutcomeEvent[] {
+    return this.db.prepare("SELECT event_json FROM outcome_events WHERE experiment_id = ? ORDER BY observed_at, event_id")
+      .all<{ event_json: string }>(experimentId)
+      .map((row) => MarxOutcomeEventSchema.parse(JSON.parse(row.event_json) as unknown));
+  }
+
+  public getPublicationByActionId(actionId: string): Publication | undefined {
+    const row = this.db.prepare("SELECT publication_json FROM publications WHERE action_id = ?").get<{ publication_json: string }>(actionId);
+    return row ? PublicationSchema.parse(JSON.parse(row.publication_json) as unknown) : undefined;
   }
 
   public saveStrategyStatistics(statistics: StrategyStatistics): void {

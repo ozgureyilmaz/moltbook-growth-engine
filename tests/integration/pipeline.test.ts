@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
-import { FixtureMoltbookSource } from "../../src/discovery";
+import { FixtureMoltbookSource, fixturePost } from "../../src/discovery";
 import { SolOrchestrator } from "../../src/orchestrator";
 import { LocalOutbox } from "../../src/outbox";
 
@@ -17,5 +17,25 @@ describe("growth vertical slice", () => {
     expect(result.summary.actionsEmitted).toBeGreaterThan(0);
     expect(result.actions.every((action) => action.action === "COMMENT" && /\bmarx\b/i.test(action.content.comment))).toBe(true);
     expect(result.logs.some((entry) => entry.event === "run_finished")).toBe(true);
+  });
+
+  it("validates official live targets in a live-read dry-run", async () => {
+    const post = fixturePost({
+      postId: "official-dry-run-post",
+      url: "https://www.moltbook.com/post/official-dry-run-post",
+      submolt: "markets",
+      content: "Agents should compare independent evidence behind a market signal before acting.",
+    });
+    const result = await new SolOrchestrator(new FixtureMoltbookSource({ posts: [post] })).run({
+      runId: "run_official_dry_run",
+      sourceMode: "live_read_only",
+      discoveryLimit: 1,
+      targetActions: 1,
+      dryRun: true,
+      allowedDomains: ["www.moltbook.com"],
+      now: post.createdAt,
+    });
+    expect(result.summary.errors).toBe(0);
+    expect(result.summary.actionsEmitted).toBeGreaterThan(0);
   });
 });

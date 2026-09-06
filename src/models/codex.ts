@@ -58,7 +58,7 @@ export class CodexExecExecutor implements ModelExecutor {
     this.reasoningEffort = options.reasoningEffort ?? "xhigh";
     this.timeoutMs = options.timeoutMs ?? 90_000;
     this.maxBufferBytes = options.maxBufferBytes ?? 8 * 1024 * 1024;
-    this.env = options.env;
+    this.env = safeCodexEnvironment(options.env ?? process.env);
     this.runner = options.runner ?? ((args, runnerOptions) => execFileAsync(this.binary, args, {
       cwd: runnerOptions.cwd,
       timeout: runnerOptions.timeout,
@@ -232,4 +232,9 @@ function nonnegativeInteger(value: number, name: string): number {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function safeCodexEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const allowed = ["PATH", "HOME", "CODEX_HOME", "XDG_CONFIG_HOME", "TMPDIR", "LANG", "LC_ALL", "TERM", "NO_COLOR"];
+  return Object.fromEntries(allowed.flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]!]]));
 }

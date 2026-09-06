@@ -54,6 +54,7 @@ export function selectStrategies(
 export function learnStrategyPriors(experiments: Array<{ strategyFamily: StrategyFamily; outcome?: ExperimentOutcome }>): StrategyPrior[] {
   const stats = new Map<StrategyFamily, { trials: number; successes: number }>();
   for (const experiment of experiments) {
+    if (!experiment.outcome) continue;
     const current = stats.get(experiment.strategyFamily) ?? { trials: 0, successes: 0 };
     current.trials += 1;
     const outcome = experiment.outcome;

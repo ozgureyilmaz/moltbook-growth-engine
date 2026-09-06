@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { makeExperimentRecord, LocalOutcomeProvider, aggregateStrategyStats } from "../../src/experiments";
-import { AuthorizedMoltbookSource, fixturePost, FixtureMoltbookSource } from "../../src/discovery";
+import { AuthorizedMoltbookSource, fixturePost, FixtureMoltbookSource, MoltbookHttpError } from "../../src/discovery";
 import { buildConversationContext } from "../../src/context";
 import { scoreOpportunity } from "../../src/analysis";
 import { generateCandidates } from "../../src/generation";
@@ -32,7 +32,7 @@ describe("local outcome and strategy learning path", () => {
       fetchPostContext: async () => ({}),
       discoverPostPage: async (_input, cursor) => {
         attempts += 1;
-        if (attempts === 1) throw new Error("temporary rate limit");
+        if (attempts === 1) throw new MoltbookHttpError("temporary rate limit", 429, true, 0);
         const post = fixturePost({ postId: cursor ? "page-2" : "page-1", url: "https://moltbook.example/posts/page", content: "Agents should compare evidence behind a market signal." });
         return { posts: [post], nextCursor: cursor ? undefined : "next" };
       },

@@ -8,5 +8,6 @@ export * from "./run";
 export * from "./worker-report";
 export * from "./publication";
 export * from "./outcome";
+export * from "./outcome-event";
 export * from "./strategy-statistics";
 export * from "./agent";

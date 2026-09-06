@@ -1,0 +1,18 @@
+flowchart TD
+  A[Operator in side browser<br/>confirm intended Moltbook agent] --> B[Terminal<br/>Keychain prompt]
+  B --> C[MacOsKeychainSecretProvider]
+  C --> D{Secret present?}
+  D -- no --> X[FAIL CLOSED<br/>doctor reports missing secret]
+  D -- yes --> E[MoltbookHttpClient<br/>GET only]
+  E --> F{Origin exactly<br/>https://www.moltbook.com/api/v1?}
+  F -- no --> X
+  F -- yes --> G[Authorization: Bearer key<br/>redirect=error]
+  G --> H[GET /posts?sort=new&limit&cursor]
+  H --> I[GET /posts/:id]
+  I --> J[GET /posts/:id/comments]
+  J --> K[Validate envelope + timestamps<br/>drop deleted/spam]
+  K --> L[Normalize post/context<br/>ConfiguredMoltbookSource filters]
+  L --> M[Sol orchestration<br/>fixture or live-read dry-run]
+  H -. 429/5xx/timeout .-> N[Bounded status-aware retry]
+  N --> H
+  H -. 401/403/malformed/redirect .-> X

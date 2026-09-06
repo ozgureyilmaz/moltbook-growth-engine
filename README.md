@@ -18,12 +18,13 @@ credentials.
 
 ## Status
 
-The local V1 vertical slice is implemented: fixture discovery, normalization,
-context analysis, explainable ranking, strategy-diverse generation, independent
-evaluation, deterministic QA, SQLite run/experiment persistence, attributed
-outbox handoff, versioned growth events, and a testable Codex Exec adapter.
-Live Moltbook discovery, publishing, and outcome telemetry remain explicit
-authorized adapter boundaries.
+The local V2 control plane is implemented: fixture discovery, an official-origin
+GET-only Moltbook read adapter, normalization, context analysis, explainable
+ranking, strategy-diverse generation, independent evaluation, deterministic QA,
+SQLite attribution and publication-bound immutable outcome events, hash-bound Hermes handoff and
+receipt reconciliation, a Keychain secret provider, supervisor lease/heartbeat,
+health checks, and an emergency kill switch. Live publishing and the authoritative
+Marx product telemetry source remain explicit external boundaries.
 Keep the checked-in defaults safe for development: dry-run is the default and
 `config/system.yaml` has `publishing.enabled: false`.
 
@@ -58,7 +59,9 @@ The default paths are local and can be changed in `config/system.yaml`:
 - SQLite: `data/marx_growth.sqlite`;
 - structured run logs: `logs/runs/`;
 - error logs: `logs/errors/`;
-- outbox: `outbox/pending/`, `outbox/acknowledged/`, and `outbox/failed/`.
+- outbox: `outbox/pending/`, `outbox/acknowledged/`, `outbox/failed/`,
+  `outbox/quarantine/`, and
+  publisher request/receipt handoff under `outbox/handoff/`.
 
 Generated state is ignored by Git. Do not commit credentials, databases,
 publisher responses, or raw sensitive content.
@@ -67,7 +70,13 @@ publisher responses, or raw sensitive content.
 
 `config/system.yaml` contains execution counts, model executor limits, local
 storage, action schema version, publishing gates, deterministic QA thresholds,
-and observability settings.
+observability settings, the disabled Moltbook source, publisher bridge model
+metadata, and supervisor paths. The checked-in source base is
+`https://www.moltbook.com/api/v1`; do not replace it with a redirecting bare
+host. `source.mode=live_read_only` and the `--live-read` flag can never create a
+production outbox entry. The separate `source.mode=authorized_autonomous` value
+is required for a future production run and remains disabled in the checked-in
+configuration.
 
 `config/submolts.yaml` contains included/excluded submolts, lookback, source
 adapters, candidate limits, topic/agent signals, and platform-compliance
@@ -90,7 +99,12 @@ currently unknown because the downstream publisher and Marx outcome telemetry
 are external to this repository. The local system emits versioned
 `action_created` events and provides explicit `action_published` and
 `outcome_observed` helpers; those events must be reconciled by the authorized
-publisher/telemetry owner before any causal growth claim is made.
+publisher/telemetry owner before any causal growth claim is made. Growth event
+v2 requires verified evidence status and a named evidence source for published
+and observed state transitions.
+Verified raw evidence can be imported with `outcomes import`; the importer
+requires an exact durable action/experiment/source-post join and a verified
+published receipt before it updates an outcome or learning prior.
 
 ## CLI and safe execution
 
@@ -102,6 +116,9 @@ npm run cli -- run --dry-run
 
 # Override configured run sizes for a dry run.
 npm run cli -- run --limit 100 --actions 5 --dry-run
+
+# Exercise the real Codex evaluator without publishing.
+npm run cli -- run --fixture ./tests/fixtures/moltbook.json --dry-run --real-model
 
 # Run entirely from a local Moltbook-like fixture.
 npm run cli -- run --fixture ./tests/fixtures/moltbook.json --dry-run
@@ -116,7 +133,25 @@ npm run cli -- replay <run_id> --dry-run
 # Start an interval/cron-backed scheduler when configured.
 npm run cli -- daemon
 npm run cli -- daemon --once --fixture ./tests/fixtures/moltbook.json --dry-run
-npm run cli -- daemon --cron "*/5 * * * *" --fixture ./tests/fixtures/moltbook.json --dry-run
+npm run cli -- daemon --once --supervised --fixture ./tests/fixtures/moltbook.json --dry-run
+npm run cli -- daemon --supervised --interval 18000000 --live-read --dry-run
+npm run cli -- daemon --supervised --cron "0 */5 * * *" --live-read --dry-run
+
+# Control-plane diagnostics and emergency stop.
+npm run cli -- doctor
+npm run cli -- ops kill-status
+npm run cli -- ops kill-engage --reason "operator emergency stop" --actor "operator"
+
+# Explicit authorized read-only rehearsal (requires a Keychain key; never publishes).
+npm run cli -- doctor --live-read
+npm run cli -- run --live-read --dry-run --limit 10 --actions 0
+
+# Explicit publisher handoff files (the separate Hermes agent owns write credentials).
+npm run cli -- handoff prepare <action_id> --grant <grant.json> --publisher-account <name>
+npm run cli -- handoff import-receipt <request_id> --receipt <receipt.json>
+
+# Import versioned outcome evidence after its exact action has a verified receipt.
+npm run cli -- outcomes import --events <events.json>
 ```
 
 `npm run cli -- ...` uses `tsx` directly. Once built, the equivalent installed
@@ -128,18 +163,62 @@ scores, deterministic rejection reasons, and final COMMENT/NO_ACTION decisions.
 It must not write a pending publisher action. Fixture runs must not call a
 live source or publish anything.
 
-Model-backed execution is selected for non-dry-run operation. It requires an
-explicitly authorized `AuthorizedMoltbookSource`, `publishing.enabled: true`, a
-non-empty production domain allow-list, and an authenticated Codex CLI session.
-The stock CLI intentionally bundles no live credentials or posting client.
+Model-backed execution is selected for non-dry-run operation. It requires
+`source.mode=authorized_autonomous`, `publishing.enabled: true`,
+`publisher_bridge.enabled: true`, a non-empty production domain allow-list, a
+valid scoped grant, a valid publisher contract secret, and an authenticated Codex CLI session. `--live-read` always
+remains read-only. The stock CLI intentionally
+bundles no Moltbook write credential or posting client. A production outbox also
+requires an explicit emergency-kill-switch gate.
+
+`--real-model` opts a dry-run into the Codex evaluator and is useful for a
+read-only rehearsal of model execution. Without it, dry-runs use the
+deterministic evaluator. Worker opportunity scoring and candidate generation
+remain deterministic; their Codex worker calls are advisory metadata until a
+model-driven implementation is added.
+
+`daemon --interval 18000000` runs immediately and waits five hours after each
+completed run. `daemon --cron "0 */5 * * *"` uses the host's local timezone and
+runs at 00:00, 05:00, 10:00, 15:00, and 20:00. Use `--supervised` so the local
+lease and periodic heartbeat protect against duplicate daemon instances. The
+repository does not install a host-level restart service. `doctor --autonomous`
+returns a non-zero exit code when the production preflight is not ready.
+
+The engine and Hermes publisher authenticate grants and receipts with a
+separate HMAC contract secret. Keep it in Keychain under the configured
+`publisher-contract` account; it is not the Moltbook API key and must never be
+placed in the repository, request files, prompts, or logs.
 
 ## Outbox consumption contract
 
 The downstream publisher consumes versioned snake_case JSON files from
-`outbox/pending/`. Internal TypeScript objects remain camelCase; the explicit
+`outbox/pending/`; prepared request and receipt files remain under
+`outbox/handoff/`. Internal TypeScript objects remain camelCase; the explicit
 serializer/deserializer in `src/outbox/transport.ts` is the compatibility
 boundary. Acknowledged and failed actions remain deduplicated, and failed
 actions require an explicit bounded retry.
+
+## Hermes publisher and receipts
+
+`src/publisher/` defines the separate-agent contract. `handoff prepare` writes a
+single `MOLTBOOK_ACTION_REQUEST` v1 containing the exact action, grant/account
+binding, idempotency key, action/body/target/content hashes, and model metadata
+(`openai-codex`, `gpt-5.6-luna`, `xhigh`). It never contains a Moltbook API key.
+
+Hermes owns its private write credential and the Moltbook write operation. The
+engine accepts only a matching, hash-valid, official-permalink
+`MOLTBOOK_PUBLICATION_RECEIPT` with `status=PUBLISHED` and
+`evidenceStatus=verified`. Failed, uncertain, and verification-required receipts
+are persisted and quarantined; they cannot be blindly retried.
+
+`MarxOutcomeEvent` records preserve source, evidence status, consent state,
+timestamps, and attribution. Verified evidence is immutable and deduplicated by
+provider evidence identity. Only events joined to an exact verified publication
+can set the canonical `marx_investigated`, `marx_interacted`, and `marx_used`
+learning signals. Pending, fixture, and dry-run experiments without verified
+outcomes are excluded from learning trials. See [the autonomy plan](docs/AUTONOMY_IMPLEMENTATION_PLAN.md),
+[the Hermes publisher runbook](docs/runbooks/HERMES_PUBLISHER_SETUP.md), and
+[separate Mermaid diagrams](docs/diagrams/).
 
 ## Action contract
 
@@ -239,10 +318,13 @@ credentials outside this repository.
 ## Source, outcome, and learning status
 
 - Fixture mode is complete and deterministic; disabled mode fails closed.
-- An authorized source adapter boundary exists, but no live Moltbook client,
-  credential, endpoint assumption, or publication capability is bundled.
-- Publication and outcome schemas/repositories exist, and local outcome
-  simulation exercises conservative strategy statistics.
+- An official-origin live read client exists behind `--live-read`; its key is
+  resolved from macOS Keychain (or explicitly configured environment mode), and
+  no credential is bundled.
+- Publication and outcome schemas/repositories exist. Local outcome simulation
+  exercises fixture-only statistics, while durable learning accepts only
+  publication-bound verified evidence imported through the outcome ingestion
+  boundary.
 - Real publisher receipts, Marx investigation/interaction/usage telemetry,
   attribution windows, and production baselines remain external and unknown.
 

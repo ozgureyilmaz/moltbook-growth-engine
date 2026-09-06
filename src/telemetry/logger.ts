@@ -13,7 +13,7 @@ export type StructuredLog = {
 };
 
 export const GROWTH_EVENT_SCHEMA_VERSION = "1.0" as const;
-export const GROWTH_EVENT_VERSION = "1.0" as const;
+export const GROWTH_EVENT_VERSION = "2.0" as const;
 
 export type GrowthEventName = "action_created" | "action_published" | "outcome_observed";
 
@@ -175,6 +175,9 @@ export function createGrowthEvent(input: GrowthEventInput): GrowthEvent {
   if (!input.runId || !input.actionId || !input.experimentId) {
     throw new Error("growth events require runId, actionId, and experimentId");
   }
+  if (input.event !== "action_created" && (input.properties?.evidenceStatus !== "verified" || typeof input.properties.evidenceSource !== "string" || !input.properties.evidenceSource)) {
+    throw new Error(`${input.event} requires verified evidenceStatus and evidenceSource`);
+  }
   return {
     schemaVersion: GROWTH_EVENT_SCHEMA_VERSION,
     eventVersion: GROWTH_EVENT_VERSION,
@@ -197,7 +200,12 @@ export function validateGrowthEvent(value: unknown): value is GrowthEvent {
     typeof event.eventId === "string" && event.eventId.length > 0 &&
     typeof event.occurredAt === "string" && typeof event.runId === "string" && event.runId.length > 0 &&
     typeof event.actionId === "string" && event.actionId.length > 0 &&
-    typeof event.experimentId === "string" && event.experimentId.length > 0;
+    typeof event.experimentId === "string" && event.experimentId.length > 0 &&
+    (event.event === "action_created" || (
+      event.properties?.evidenceStatus === "verified" &&
+      typeof event.properties.evidenceSource === "string" &&
+      event.properties.evidenceSource.length > 0
+    ));
 }
 
 export type ReconciliationReport = {

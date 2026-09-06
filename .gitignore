@@ -8,10 +8,14 @@ coverage/
 data/*.sqlite
 data/*.sqlite-*
 data/*.json
+data/runtime/
+data/publisher-handoff/
 logs/**/*.jsonl
+logs/**/*.json
 outbox/pending/*
 outbox/acknowledged/*
 outbox/failed/*
+outbox/handoff/
 !outbox/pending/.gitkeep
 !outbox/acknowledged/.gitkeep
 !outbox/failed/.gitkeep

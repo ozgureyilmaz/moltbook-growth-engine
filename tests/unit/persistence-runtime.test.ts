@@ -5,6 +5,7 @@ import { makeActionPayload } from "../../src/outbox";
 import { type SqliteDatabase } from "../../src/persistence/database";
 import { applyMigrations } from "../../src/persistence/migrations";
 import { SqliteRuntimePersistence } from "../../src/persistence/runtime";
+import { createMarxOutcomeEvent, ingestVerifiedOutcomeEvents } from "../../src/telemetry";
 import type {
   ConversationContext,
   EvaluationResult,
@@ -113,7 +114,7 @@ function summary(runId: string): RunSummary {
 }
 
 describe("SqliteRuntimePersistence attribution", () => {
-  it("persists one idempotent, source-post-consistent chain without a runtime placeholder", () => {
+  it("persists one idempotent, source-post-consistent chain without a runtime placeholder", async () => {
     const db = new Database(":memory:");
     applyMigrations(db as unknown as SqliteDatabase);
     const persistence = new SqliteRuntimePersistence(db as unknown as SqliteDatabase);
@@ -142,6 +143,7 @@ describe("SqliteRuntimePersistence attribution", () => {
     ]);
     expect(db.prepare("SELECT run_id, candidate_id FROM evaluations").all()).toEqual([{ run_id: runId, candidate_id: candidate.candidateId }]);
     expect(db.prepare("SELECT action_id FROM actions").all()).toEqual([{ action_id: action.actionId }]);
+    expect(persistence.getAction(action.actionId)).toMatchObject({ action: "COMMENT", actionId: action.actionId, metadata: { runId } });
     expect(db.prepare("SELECT COUNT(*) AS count FROM runtime_attribution").get()).toEqual({ count: 4 });
     expect(db.prepare("SELECT DISTINCT run_id FROM runtime_attribution WHERE run_id = 'runtime'").all()).toEqual([]);
 
@@ -153,6 +155,42 @@ describe("SqliteRuntimePersistence attribution", () => {
       actionId: action.actionId,
       experimentId: experiment.experimentId,
     });
+    persistence.savePublication({
+      publicationId: "receipt-uncertain-42",
+      actionId: action.actionId,
+      experimentId: experiment.experimentId,
+      status: "failed",
+      attemptedAt: "2026-08-24T00:02:30.000Z",
+      errorMessage: "provider result unknown",
+      metadata: { evidenceStatus: "unverified", targetPostId: post.postId },
+    });
+    persistence.savePublication({
+      publicationId: "receipt-attribution-42",
+      actionId: action.actionId,
+      experimentId: experiment.experimentId,
+      status: "published",
+      attemptedAt: "2026-08-24T00:02:30.000Z",
+      acknowledgedAt: "2026-08-24T00:03:00.000Z",
+      metadata: { evidenceStatus: "verified", targetPostId: post.postId },
+    });
+    expect(persistence.getPublicationByActionId(action.actionId)).toMatchObject({ publicationId: "receipt-attribution-42", status: "published" });
+    const usage = createMarxOutcomeEvent({
+      eventType: "marx_used",
+      actionId: action.actionId,
+      experimentId: experiment.experimentId,
+      runId,
+      sourcePostId: post.postId,
+      targetAgentId: post.author.id,
+      value: true,
+      source: "marx_product",
+      evidenceStatus: "verified",
+      evidenceId: "marx-usage-evidence-42",
+      occurredAt: "2026-08-24T00:04:00.000Z",
+      observedAt: "2026-08-24T00:05:00.000Z",
+      consentState: "granted",
+    });
+    await ingestVerifiedOutcomeEvents(persistence, [usage]);
+    expect(persistence.getExperiments()[0]?.outcome).toMatchObject({ marxUsageSignal: true });
     db.close();
   });
 });

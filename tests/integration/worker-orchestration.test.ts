@@ -77,7 +77,8 @@ describe("bounded Sol/Luna worker orchestration", () => {
         : { ok: true, summary: `advisory for ${task.worker}`, concerns: [] },
     });
     const reports: WorkerReport[] = [];
-    const result = await new SolOrchestrator({ discoverPosts: async () => [post], fetchPostContext: async () => ({ post, replies: [], fetchedAt: post.fetchedAt }) }, { saveWorkerReport: (report) => reports.push(report) }).run({
+    const modelRuns: unknown[] = [];
+    const result = await new SolOrchestrator({ discoverPosts: async () => [post], fetchPostContext: async () => ({ post, replies: [], fetchedAt: post.fetchedAt }) }, { saveWorkerReport: (report) => reports.push(report), saveModelRun: (record) => modelRuns.push(record) }).run({
       runId: "worker-model",
       dryRun: true,
       evaluationMode: "real_model",
@@ -88,5 +89,6 @@ describe("bounded Sol/Luna worker orchestration", () => {
     expect(result.summary.realModelEvaluations).toBeGreaterThan(0);
     expect(result.summary.modelCalls).toBeGreaterThanOrEqual(4);
     expect(reports.some((report) => Number(report.metrics?.modelWorkerCalls ?? 0) > 0)).toBe(true);
+    expect(modelRuns.length).toBeGreaterThan(0);
   });
 });

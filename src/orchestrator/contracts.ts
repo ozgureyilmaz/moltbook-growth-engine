@@ -7,7 +7,7 @@
  */
 import type * as SharedDomain from "../domain";
 import type * as SharedPersistence from "../persistence";
-import type { ModelRunRecord, Outcome, Publication, StrategyStatistics } from "../schemas";
+import type { MarxOutcomeEvent, ModelRunRecord, Outcome, Publication, StrategyStatistics } from "../schemas";
 
 export type DomainExports = typeof SharedDomain;
 export type PersistenceExports = typeof SharedPersistence;
@@ -328,6 +328,25 @@ export type PersistenceLike = {
   saveWorkerReport?: (report: WorkerReport) => Promise<void> | void;
   savePublication?: (publication: Publication) => Promise<void> | void;
   saveOutcome?: (outcome: Outcome) => Promise<void> | void;
+  saveOutcomeEvent?: (event: MarxOutcomeEvent) => Promise<void> | void;
+  listOutcomeEvents?: (experimentId: string) => Promise<MarxOutcomeEvent[]> | MarxOutcomeEvent[];
+  getPublicationByActionId?: (actionId: string) => Promise<Publication | undefined> | Publication | undefined;
+  getAction?: (actionId: string) => Promise<ActionPayload | NoActionDecision | undefined> | ActionPayload | NoActionDecision | undefined;
+  getExperimentAttribution?: (experimentId: string) => Promise<{
+    runId: string;
+    sourcePostId: string;
+    opportunityId?: string;
+    candidateId?: string;
+    actionId?: string;
+    experimentId: string;
+  } | undefined> | {
+    runId: string;
+    sourcePostId: string;
+    opportunityId?: string;
+    candidateId?: string;
+    actionId?: string;
+    experimentId: string;
+  } | undefined;
   saveStrategyStatistics?: (statistics: StrategyStatistics) => Promise<void> | void;
   saveModelRun?: (modelRun: ModelRunRecord) => Promise<void> | void;
   getRun?: (runId: string) => Promise<RunSummary | undefined> | RunSummary | undefined;

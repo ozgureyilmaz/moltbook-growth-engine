@@ -8,13 +8,13 @@ import { finalDecision, IndependentMockEvaluator, ModelBackedCandidateEvaluator,
 import { assignExperiment, makeExperimentRecord, ExperimentEngine } from "../experiments";
 import { makeActionPayload, makeNoAction, validateActionPayload } from "../outbox";
 import { LocalOutbox } from "../outbox";
-import { opportunityIdFor } from "../domain/identifiers";
+import { modelRunIdFor, opportunityIdFor } from "../domain/identifiers";
 import { resolveRuntimeThresholds, type ResolvedRuntimeThresholds, type RuntimeThresholds } from "../config";
 import { emitActionCreated, silentLogger, type GrowthEvent, type StructuredLogger } from "../telemetry";
 import { CodexExecExecutor, type ModelExecutor, type ModelTask } from "../models";
 import { loadPromptSync } from "../prompts/loader";
 import { runBoundedWorkers, validateRuntimeWorkerReport, type BoundedWorkerBatch, type RuntimeWorkerInput } from "./workers";
-import { EvaluationResultSchema, QAResultSchema, RuntimeGeneratedCandidateSchema, RuntimeOpportunitySchema, ConversationContextSchema, MoltbookPostSchema } from "../schemas";
+import { EvaluationResultSchema, QAResultSchema, RuntimeGeneratedCandidateSchema, RuntimeOpportunitySchema, ConversationContextSchema, MoltbookPostSchema, type ModelRunRecord } from "../schemas";
 import type { ActionPayload, ConversationContext, DiscoveryRequest, EvaluationResult, GeneratedCandidate, MoltbookPost, NoActionDecision, Opportunity, PersistenceLike, RunSummary, RuntimeWorkerRole, WorkerReport } from "./contracts";
 import type { MoltbookSource } from "../discovery";
 
@@ -31,7 +31,7 @@ export type ObservableRunSummary = RunSummary & {
   deterministicMockEvaluations: number;
   realModelEvaluations: number;
   evaluation: EvaluationSummary;
-  sourceMode: "fixture" | "authorized" | "injected" | "disabled" | "unknown";
+  sourceMode: "fixture" | "live_read_only" | "authorized_autonomous" | "authorized" | "injected" | "disabled" | "unknown";
   replayOf?: string;
 };
 
@@ -80,6 +80,8 @@ export type OrchestratorOptions = {
   modelMaxAttempts?: number;
   modelConcurrency?: number;
   modelRetryBackoffMs?: number;
+  /** Configured target domains used by action validation in both modes. */
+  allowedDomains?: string[];
 };
 
 export type OrchestratorResult = {
@@ -229,7 +231,7 @@ export class SolOrchestrator {
           const canonicalContext = ConversationContextSchema.parse(context);
           await this.persistWithContext("savePost", MoltbookPostSchema.parse(post), runContext);
           await this.persistWithContext("saveContext", canonicalContext, runContext);
-          const advisory = await runWorkerAdvisory(runtimeModelExecutor, task, "opportunity", { post, context: canonicalContext });
+          const advisory = await runWorkerAdvisory(runtimeModelExecutor, task, "opportunity", { post, context: canonicalContext }, (record) => this.persistence.saveModelRun?.(record));
           return {
             output: { post: MoltbookPostSchema.parse(post), context: canonicalContext },
             summary: `context fetched for ${post.postId}`,
@@ -276,7 +278,7 @@ export class SolOrchestrator {
             sourcePostId: post.postId,
           });
           await this.persistWithContext("saveOpportunity", opportunity, runContext);
-          const advisory = await runWorkerAdvisory(runtimeModelExecutor, task, "opportunity", { post, context });
+          const advisory = await runWorkerAdvisory(runtimeModelExecutor, task, "opportunity", { post, context }, (record) => this.persistence.saveModelRun?.(record));
           return {
             output: opportunity,
             summary: `opportunity scored for ${post.postId}`,
@@ -319,7 +321,7 @@ export class SolOrchestrator {
             runId,
             sourcePostId: opportunity.post.postId,
           }));
-          const advisory = await runWorkerAdvisory(runtimeModelExecutor, task, "strategy", opportunity);
+          const advisory = await runWorkerAdvisory(runtimeModelExecutor, task, "strategy", opportunity, (record) => this.persistence.saveModelRun?.(record));
           return {
             output: { opportunity, candidateList },
             summary: `generated ${candidateList.length} strategy-diverse candidates for ${opportunity.post.postId}`,
@@ -391,7 +393,7 @@ export class SolOrchestrator {
           if (decision.kind === "publish" && policyDecision.allowed) {
             const experiment = makeExperimentRecord(runId, opportunity, candidate, decision.evaluation);
             const action = makeActionPayload(runId, opportunity, candidate, decision.evaluation, runContext.now, experiment.experimentId);
-            if (!validateActionPayload(action as unknown)) {
+            if (!validateActionPayload(action as unknown, { mode: runContext.dryRun ? "dry-run" : "production", allowedDomains: options.allowedDomains ?? [] })) {
               summary.errors += 1;
               recordFailure(summary, "invalid_schema", "action payload validation failed", "action", action.actionId);
               logger.error("action_validation_failed", { actionId: action.actionId, experimentId: action.experiment.experimentId });
@@ -414,6 +416,7 @@ export class SolOrchestrator {
                 properties: {
                   dryRun: summary.dryRun,
                   evaluationMode,
+                  sourceMode: runContext.sourceMode,
                   strategyFamily: candidate.strategyFamily,
                 },
               }));
@@ -559,6 +562,7 @@ async function runWorkerAdvisory<T>(
   task: RuntimeWorkerInput<T>,
   stage: "opportunity" | "strategy",
   payload: unknown,
+  onModelRun?: (record: ModelRunRecord) => Promise<void> | void,
 ): Promise<Record<string, unknown>> {
   if (!executor) return {};
   const prompt = loadPromptSync(stage, "v1");
@@ -573,11 +577,47 @@ async function runWorkerAdvisory<T>(
     retryPolicy: task.retryPolicy,
     expectedOutputSchema: "WorkerAdvisorySchema",
     trustedInstructions: `${prompt.instructions}\n\nReturn only the compact WorkerAdvisorySchema object. This is advisory; deterministic scoring and QA remain authoritative.`,
-    input: { objective: task.objective, constraints: task.constraints, terminationCondition: task.terminationCondition, payload },
+      // Keep external post/context content solely in the untrusted channel. If
+      // it is copied into task.input it is rendered as trusted metadata by the
+      // Codex adapter and can influence instruction precedence.
+      input: { objective: task.objective, constraints: task.constraints, terminationCondition: task.terminationCondition, taskId: task.taskId },
     untrustedContext: payload,
     outputSchema: WorkerAdvisorySchema,
   };
-  const result = await executor.run(modelTask);
+  const attemptedAt = new Date().toISOString();
+  let result;
+  try {
+    result = await executor.run(modelTask);
+    await onModelRun?.({
+      modelRunId: modelRunIdFor(task.runId, modelTask.taskId, result.attempts),
+      runId: task.runId,
+      taskId: modelTask.taskId,
+      kind: modelTask.kind,
+      model: result.model,
+      modelVersion: result.modelVersion,
+      status: "SUCCEEDED",
+      attempts: result.attempts,
+      startedAt: result.startedAt,
+      finishedAt: result.finishedAt,
+      metadata: { worker: task.worker, stage, promptVersion: modelTask.promptVersion, expectedOutputSchema: modelTask.expectedOutputSchema },
+    });
+  } catch (error) {
+    await onModelRun?.({
+      modelRunId: modelRunIdFor(task.runId, modelTask.taskId, 1),
+      runId: task.runId,
+      taskId: modelTask.taskId,
+      kind: modelTask.kind,
+      model: modelTask.model ?? "codex",
+      modelVersion: modelTask.modelVersion ?? "codex",
+      status: "FAILED",
+      attempts: 1,
+      startedAt: attemptedAt,
+      finishedAt: new Date().toISOString(),
+      errorMessage: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+      metadata: { worker: task.worker, stage, promptVersion: modelTask.promptVersion, expectedOutputSchema: modelTask.expectedOutputSchema },
+    });
+    throw error;
+  }
   return { modelWorkerCalls: 1, modelAttempts: result.attempts, modelSummary: result.output.summary };
 }
 

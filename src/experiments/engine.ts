@@ -218,6 +218,8 @@ function signalCounts(outcome: ExperimentOutcome): Record<string, number> {
 export function aggregateStrategyStats(inputs: StrategyStatsInput[]): StrategyStats[] {
   const stats = new Map<string, StrategyStats>();
   for (const input of inputs) {
+    const outcome = input.outcome ?? input.experiment.outcome;
+    if (!outcome) continue;
     const dimensions = strategyStatsDimensions(input.experiment, input.dimensions);
     const key = strategyStatsKey(dimensions);
     const current = stats.get(key) ?? {
@@ -234,7 +236,6 @@ export function aggregateStrategyStats(inputs: StrategyStatsInput[]): StrategySt
       posteriorMean: 0.5,
       standardError: 0.25,
     };
-    const outcome = input.outcome ?? input.experiment.outcome;
     current.trials += 1;
     if (northStar(outcome)) {
       current.successes += 1;
@@ -281,7 +282,8 @@ export class StrategyStatsStore {
   public async record(input: StrategyStatsInput): Promise<StrategyStats> {
     await this.load();
     const merged = aggregateStrategyStats([{ experiment: input.experiment, outcome: input.outcome, dimensions: input.dimensions, observedAt: input.observedAt }]);
-    const next = merged[0]!;
+    const next = merged[0];
+    if (!next) throw new Error("Strategy statistics require an observed outcome");
     const existing = this.stats.get(next.key);
     const combined: StrategyStats = existing ? {
       ...next,
@@ -308,6 +310,14 @@ export class StrategyStatsStore {
   public async recordExperiments(inputs: StrategyStatsInput[]): Promise<StrategyStats[]> {
     await this.load();
     for (const input of inputs) await this.record(input);
+    return this.list();
+  }
+
+  /** Rebuild the file from durable experiment outcomes without double-counting imports. */
+  public async replaceExperiments(inputs: StrategyStatsInput[]): Promise<StrategyStats[]> {
+    this.loaded = true;
+    this.stats = new Map(aggregateStrategyStats(inputs).map((entry) => [entry.key, entry]));
+    await this.flush();
     return this.list();
   }
 

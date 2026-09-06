@@ -1,0 +1,53 @@
+project_dir=/Users/0x79de/Documents/ChatGPT/moltbook-growth-engine
+node_bin=/Users/0x79de/.nvm/versions/node/v22.17.0/bin/node
+publisher_python=/opt/homebrew/bin/python3
+publisher_script=/Users/0x79de/.hermes/skills/automation/moltbook-deterministic-publisher/scripts/publish_moltbook_action.py
+publisher_config=/Users/0x79de/.hermes/data/moltbook-publisher.json
+
+export PATH=/Users/0x79de/.nvm/versions/node/v22.17.0/bin:/Users/0x79de/.local/bin:/usr/bin:/bin
+cd "$project_dir"
+set -euo pipefail
+
+cycle_dir=""
+
+cleanup() {
+  "$node_bin" "$project_dir/dist/cli/main.js" ops kill-engage \
+    --reason "cycle stopped or completed" \
+    --actor ozgur >/dev/null 2>&1 || true
+
+  if [[ -n "$cycle_dir" ]]; then
+    rm -rf "$cycle_dir"
+  fi
+}
+
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap cleanup EXIT
+
+cycle_dir="$(mktemp -d -t marx-moltbook-cycle)"
+clearance_path="$cycle_dir/clearance.json"
+
+"$node_bin" "$project_dir/dist/cli/main.js" ops kill-clearance-create \
+  --output "$clearance_path" \
+  --minutes 30 \
+  --actor ozgur \
+  --reason "bounded Marx.finance autonomous cycle"
+
+"$node_bin" "$project_dir/dist/cli/main.js" ops kill-clear \
+  --clearance "$clearance_path"
+
+"$node_bin" "$project_dir/dist/cli/main.js" doctor \
+  --autonomous \
+  --live-read
+
+"$node_bin" "$project_dir/dist/cli/main.js" run \
+  --dry-run=false \
+  --real-model \
+  --limit 100 \
+  --actions 5
+
+"$publisher_python" "$publisher_script" \
+  --config "$publisher_config"
+
+cleanup
+cycle_dir=""

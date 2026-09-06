@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FixtureMoltbookSource } from "../../src/discovery";
-import { runCli } from "../../src/cli";
+import { parseArgs, runCli } from "../../src/cli";
 import { SolOrchestrator, type RunContext } from "../../src/orchestrator";
 import { emitActionPublished, emitOutcomeObserved, silentLogger } from "../../src/telemetry";
 import type { PersistenceLike, RunSummary } from "../../src/orchestrator";
@@ -31,6 +31,10 @@ function storedRun(runId: string): RunSummary {
 }
 
 describe("CLI and growth observability handoff", () => {
+  it("parses an explicit real-model dry-run switch", () => {
+    expect(parseArgs(["run", "--fixture", fixturePath, "--dry-run", "--real-model"]).options).toMatchObject({ "real-model": true });
+  });
+
   it("keeps fixture runs local, carries run context, and labels mock evaluation truthfully", async () => {
     const fixture = JSON.parse(await readFile(fixturePath, "utf8")) as ConstructorParameters<typeof FixtureMoltbookSource>[0];
     const contexts: RunContext[] = [];
@@ -72,23 +76,35 @@ describe("CLI and growth observability handoff", () => {
 
   it("emits versioned publication and outcome events only when explicitly handed those facts", () => {
     const logger = silentLogger("run_events");
-    const published = emitActionPublished(logger, { runId: "run_events", actionId: "act_1", experimentId: "exp_1", occurredAt: "2026-08-24T01:00:00.000Z" });
+    const published = emitActionPublished(logger, { runId: "run_events", actionId: "act_1", experimentId: "exp_1", occurredAt: "2026-08-24T01:00:00.000Z", properties: { evidenceStatus: "verified", evidenceSource: "publisher_receipt" } });
     const observed = emitOutcomeObserved(logger, {
       runId: "run_events",
       actionId: "act_1",
       experimentId: "exp_1",
       occurredAt: "2026-08-24T01:05:00.000Z",
-      properties: { replyReceived: true },
+      properties: { replyReceived: true, evidenceStatus: "verified", evidenceSource: "marx_outcome_event" },
     });
-    expect(published.eventVersion).toBe("1.0");
+    expect(published.eventVersion).toBe("2.0");
     expect(observed.event).toBe("outcome_observed");
     expect(logger.entries().map((entry) => entry.event)).toEqual(["action_published", "outcome_observed"]);
     expect(logger.entries().every((entry) => entry.actionId === "act_1" && entry.experimentId === "exp_1")).toBe(true);
+    expect(() => emitActionPublished(logger, { runId: "run_events", actionId: "act_2", experimentId: "exp_2" })).toThrow(/verified evidenceStatus/u);
   });
 
   it("does not expose a false run listing when the persistence adapter cannot list runs", async () => {
     const text = await runCli(["status"], { persistence: {}, stdout: () => undefined });
     expect(text).toContain("does not expose run listing");
+  });
+
+  it("fails an autonomous doctor preflight through the process error boundary", async () => {
+    const configDirectory = await mkdtemp(join(tmpdir(), "moltbook-doctor-preflight-"));
+    try {
+      await writeFile(join(configDirectory, "system.yaml"), "source:\n  mode: disabled\npublishing:\n  enabled: false\npublisher_bridge:\n  enabled: false\n", "utf8");
+      await expect(runCli(["doctor", "--autonomous"], { configDirectory, persistence: {}, stdout: () => undefined }))
+        .rejects.toThrow("doctor --autonomous is NOT_READY");
+    } finally {
+      await rm(configDirectory, { recursive: true, force: true });
+    }
   });
 
   it("rejects production handoff from fixture or unverified injected source modes", async () => {
@@ -97,6 +113,17 @@ describe("CLI and growth observability handoff", () => {
     await writeFile(join(configDirectory, "submolts.yaml"), "submolts:\n  include: []\n  exclude: []\nlookback:\n  hours: 24\ncandidate_limit:\n  per_run: 100\n", "utf8");
     await writeFile(join(configDirectory, "experiments.yaml"), "candidate_generation:\n  count: 4\nstrategy_selection:\n  exploration_rate: 0.25\n  exploitation_rate: 0.75\nstrategy_families: [provenance]\n", "utf8");
     await expect(runCli(["run", "--fixture", fixturePath, "--dry-run=false"], { configDirectory, persistence: {}, stdout: () => undefined }))
-      .rejects.toThrow("authorized Moltbook source mode");
+      .rejects.toThrow("source.mode=authorized_autonomous");
+  });
+
+  it("keeps explicit live-read mode out of production runs and handoff preparation", async () => {
+    const configDirectory = await mkdtemp(join(tmpdir(), "moltbook-live-read-gate-"));
+    await writeFile(join(configDirectory, "system.yaml"), "execution:\n  dry_run_by_default: false\nsource:\n  mode: live_read_only\npublishing:\n  enabled: true\npublisher_bridge:\n  enabled: true\n  type: hermes_outbox\nsafety:\n  allowed_domains: [www.moltbook.com]\n", "utf8");
+    await writeFile(join(configDirectory, "submolts.yaml"), "submolts:\n  include: []\n  exclude: []\nlookback:\n  hours: 24\ncandidate_limit:\n  per_run: 100\n", "utf8");
+    await writeFile(join(configDirectory, "experiments.yaml"), "candidate_generation:\n  count: 4\nstrategy_selection:\n  exploration_rate: 0.25\n  exploitation_rate: 0.75\nstrategy_families: [provenance]\n", "utf8");
+    await expect(runCli(["run", "--live-read", "--dry-run=false"], { configDirectory, persistence: {}, stdout: () => undefined }))
+      .rejects.toThrow(/--live-read is always read-only/u);
+    await expect(runCli(["handoff", "prepare", "action-1", "--grant", "missing.json", "--publisher-account", "MarxMolty"], { configDirectory, persistence: {}, stdout: () => undefined }))
+      .rejects.toThrow(/source.mode=authorized_autonomous/u);
   });
 });

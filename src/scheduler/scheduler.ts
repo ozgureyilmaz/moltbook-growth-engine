@@ -5,6 +5,7 @@ export type SchedulerOptions = OrchestratorOptions & {
   intervalMs?: number;
   cronExpression?: string;
   signal?: AbortSignal;
+  beforeRun?: () => void | Promise<void>;
   onRun?: (result: OrchestratorResult) => void | Promise<void>;
 };
 
@@ -33,7 +34,30 @@ function cronFieldMatches(value: number, field: string, min: number, max: number
 export function validateCronExpression(expression: string): string {
   const fields = expression.trim().split(/\s+/);
   if (fields.length !== 5 || fields.some((field) => !/^[0-9*,\-\/]+$/.test(field))) throw new Error("cron must be a standard five-field expression: minute hour day-of-month month day-of-week");
+  validateCronField(fields[0]!, 0, 59, "minute");
+  validateCronField(fields[1]!, 0, 23, "hour");
+  validateCronField(fields[2]!, 1, 31, "day-of-month");
+  validateCronField(fields[3]!, 1, 12, "month");
+  validateCronField(fields[4]!, 0, 6, "day-of-week");
   return fields.join(" ");
+}
+
+function validateCronField(field: string, min: number, max: number, name: string): void {
+  for (const part of field.split(",")) {
+    const pieces = part.split("/");
+    if (pieces.length > 2) throw new Error(`cron ${name} field is invalid: ${field}`);
+    const base = pieces[0] ?? "";
+    const step = pieces[1] === undefined ? 1 : Number(pieces[1]);
+    if (!Number.isInteger(step) || step < 1) throw new Error(`cron ${name} field has an invalid step: ${field}`);
+    if (base === "*") continue;
+    if (!base) throw new Error(`cron ${name} field is invalid: ${field}`);
+    const range = base.includes("-") ? base.split("-").map(Number) : [Number(base), Number(base)];
+    if (range.length !== 2 || range.some((value) => !Number.isInteger(value) || value < min || value > max)) {
+      throw new Error(`cron ${name} field is outside ${min}-${max}: ${field}`);
+    }
+    const [start, end] = range as [number, number];
+    if (start > end) throw new Error(`cron ${name} field has a descending range: ${field}`);
+  }
 }
 
 export function nextCronDelay(expression: string, from = new Date()): number {
@@ -51,12 +75,15 @@ export function nextCronDelay(expression: string, from = new Date()): number {
 
 /** Interval scheduling is intentionally in-process and cancellable for local V1 operation. */
 export async function runDaemon(orchestrator: SolOrchestrator, options: SchedulerOptions = {}): Promise<void> {
-  const intervalMs = Math.max(0, options.intervalMs ?? 60 * 60 * 1000);
+  const intervalMs = options.intervalMs ?? 60 * 60 * 1000;
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 1) throw new RangeError("intervalMs must be a positive safe integer");
   const cronExpression = options.cronExpression ? validateCronExpression(options.cronExpression) : undefined;
   let stopped = false;
   const stop = () => { stopped = true; };
   options.signal?.addEventListener("abort", stop, { once: true });
   while (!stopped) {
+    await options.beforeRun?.();
+    if (stopped) break;
     const result = await orchestrator.run(options.runId ? options : { ...options, runId: createRunId() });
     await options.onRun?.(result);
     if (stopped) break;

@@ -180,6 +180,34 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_runtime_attribution_source ON runtime_attribution(run_id, source_post_id);
     `,
   },
+  {
+    version: 2,
+    name: "verified_outcome_event_evidence",
+    sql: `
+      CREATE TABLE IF NOT EXISTS outcome_events (
+        event_id TEXT PRIMARY KEY,
+        action_id TEXT NOT NULL,
+        experiment_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        evidence_status TEXT NOT NULL,
+        event_json TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        observed_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_outcome_events_experiment ON outcome_events(experiment_id, observed_at);
+      CREATE INDEX IF NOT EXISTS idx_outcome_events_action ON outcome_events(action_id, observed_at);
+    `,
+  },
+  {
+    version: 3,
+    name: "outcome_evidence_identity",
+    sql: `
+      ALTER TABLE outcome_events ADD COLUMN evidence_key TEXT;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_events_evidence_key
+        ON outcome_events(evidence_key) WHERE evidence_key IS NOT NULL;
+    `,
+  },
 ];
 
 export function applyMigrations(db: SqliteDatabase, migrations: readonly Migration[] = MIGRATIONS): void {
@@ -251,6 +279,18 @@ function ensureCurrentSchema(db: SqliteDatabase): void {
       outcome_json TEXT NOT NULL,
       observed_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS outcome_events (
+      event_id TEXT PRIMARY KEY,
+      action_id TEXT NOT NULL,
+      experiment_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      evidence_status TEXT NOT NULL,
+      event_json TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      evidence_key TEXT
+    );
     CREATE TABLE IF NOT EXISTS strategy_statistics (
       statistics_id TEXT PRIMARY KEY,
       strategy_family TEXT NOT NULL,
@@ -275,6 +315,9 @@ function ensureCurrentSchema(db: SqliteDatabase): void {
     CREATE INDEX IF NOT EXISTS idx_publications_status ON publications(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_agents_last_seen ON agents(last_seen_at DESC);
     CREATE INDEX IF NOT EXISTS idx_outcomes_experiment ON outcomes(experiment_id, observed_at);
+    CREATE INDEX IF NOT EXISTS idx_outcome_events_experiment ON outcome_events(experiment_id, observed_at);
+    CREATE INDEX IF NOT EXISTS idx_outcome_events_action ON outcome_events(action_id, observed_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_events_evidence_key ON outcome_events(evidence_key) WHERE evidence_key IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_strategy_statistics_family ON strategy_statistics(strategy_family, updated_at);
     CREATE VIEW IF NOT EXISTS strategy_stats AS SELECT * FROM strategy_statistics;
     CREATE INDEX IF NOT EXISTS idx_runtime_attribution_experiment ON runtime_attribution(run_id, experiment_id);

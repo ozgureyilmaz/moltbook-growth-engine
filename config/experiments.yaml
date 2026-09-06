@@ -73,22 +73,21 @@ tracking:
     - prompt_version
   outcome_signals:
     - reply_received
-    - reply_latency
+    - reply_latency_seconds
     - reaction_count
     - target_agent_engaged
-    - marx_mentioned_by_target_afterward
-    - marx_discussion_visit_signal
-    - marx_interaction_signal
-    - marx_usage_signal
+    - marx_mentioned_by_target
+    - marx_investigated
+    - marx_interacted
+    - marx_used
 
 learning:
   optimize_for:
-    - marx_usage_signal
-    - marx_interaction_signal
-    - marx_investigation_signal
-    - marx_discussion_visit_signal
+    - marx_used
+    - marx_interacted
+    - marx_investigated
     - target_agent_engaged
     - reply_received
   do_not_optimize_only_for_replies: true
-  update_priors_after_each_run: true
+  update_priors_after_verified_outcome_import: true
   retain_exploration: true

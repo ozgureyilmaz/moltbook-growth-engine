@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { makeActionPayload, LocalOutbox, validateActionPayload } from "../../src/outbox";
 import { fixturePost, FixtureMoltbookSource } from "../../src/discovery";
 import { buildConversationContext } from "../../src/context";
@@ -42,12 +42,30 @@ describe("durable outbox state", () => {
     expect((await boundedOutbox.getState(bounded.actionId))?.attemptCount).toBe(1);
   });
 
+  it("acknowledges a reconciliation failure after a verified provider read-back", async () => {
+    const root = "/tmp/moltbook-growth-outbox-reconciliation-unit";
+    await rm(root, { recursive: true, force: true });
+    const action = await actionFixture();
+    const productionAction = { ...action, target: { ...action.target, postUrl: "https://www.moltbook.com/post/outbox-state-post" } };
+    const outbox = new LocalOutbox(root, { mode: "production", allowedDomains: ["www.moltbook.com"], productionGate: () => undefined });
+    await outbox.enqueue(productionAction);
+    await outbox.fail(productionAction.actionId, "read-back was temporarily stale", { reconciliationRequired: true });
+    expect(await outbox.acknowledge(productionAction.actionId)).toBe(true);
+    expect((await outbox.getState(productionAction.actionId))?.status).toBe("ACKNOWLEDGED");
+    expect((await outbox.listPending())).toHaveLength(0);
+  });
+
   it("enforces HTTP(S) and production allow-list URL policy", async () => {
     const action = await actionFixture();
     expect(validateActionPayload({ ...action, target: { ...action.target, postUrl: "javascript:alert(1)" } }, { mode: "production", allowedDomains: ["moltbook.example"] })).toBe(false);
     expect(validateActionPayload({ ...action, target: { ...action.target, postUrl: "https://moltbook.example/post/1" } }, { mode: "production", allowedDomains: ["moltbook.example"] })).toBe(true);
     expect(validateActionPayload({ ...action, target: { ...action.target, postUrl: "https://unapproved.example/post/1" } }, { mode: "production", allowedDomains: ["moltbook.example"] })).toBe(false);
     expect(validateActionPayload({ ...action, target: { ...action.target, postUrl: "http://localhost/post/1" } }, { mode: "production", allowedDomains: ["localhost"] })).toBe(false);
+  });
+
+  it("accepts an official live target during a dry-run when its domain is configured", async () => {
+    const action = await actionFixture();
+    expect(validateActionPayload({ ...action, target: { ...action.target, postUrl: "https://www.moltbook.com/post/outbox-state-post" } }, { mode: "dry-run", allowedDomains: ["www.moltbook.com"] })).toBe(true);
   });
 
   it("atomically deduplicates concurrent enqueues and leaves no temporary files", async () => {
@@ -67,5 +85,17 @@ describe("durable outbox state", () => {
     const stored = JSON.parse(await readFile(`${root}/pending/${action.actionId}.json`, "utf8")) as Record<string, unknown>;
     expect(stored).toMatchObject({ schema_version: "1.0", action_id: action.actionId });
     expect(stored).not.toHaveProperty("schemaVersion");
+  });
+
+  it("quarantines malformed pending files instead of silently dropping them", async () => {
+    const root = "/tmp/moltbook-growth-outbox-quarantine-unit";
+    await rm(root, { recursive: true, force: true });
+    await mkdir(`${root}/pending`, { recursive: true });
+    await writeFile(`${root}/pending/bad.json`, "{not-json", "utf8");
+    const outbox = new LocalOutbox(root);
+    expect(await outbox.listPending()).toHaveLength(0);
+    const quarantineNames = await readdir(`${root}/quarantine`);
+    expect(quarantineNames.some((name) => name.startsWith("bad.invalid-") && name.endsWith(".json"))).toBe(true);
+    expect(quarantineNames.some((name) => name.endsWith(".error.json"))).toBe(true);
   });
 });

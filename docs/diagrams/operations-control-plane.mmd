@@ -1,0 +1,28 @@
+flowchart LR
+  subgraph Supervisor[Local supervisor]
+    L[Singleton lease<br/>supervisor.lock.json]
+    B[Heartbeat<br/>STARTING/RUNNING/STOPPED]
+    S[SIGINT/SIGTERM<br/>AbortSignal + drain]
+  end
+  subgraph Gates[Safety gates]
+    K[Emergency kill switch<br/>missing/invalid = ENGAGED]
+    G[Scoped grant<br/>account + action IDs + expiry + cap]
+    Q[Deterministic QA<br/>NO_ACTION on failure]
+  end
+  subgraph Health[Doctor/readiness]
+    C[Config + migrations]
+    D[Writable runtime dirs]
+    R[Read auth probe]
+    H[Hermes command/model contract]
+  end
+  L --> B
+  S --> B
+  C --> D --> R --> H
+  H --> K
+  K --> G
+  G --> Q
+  Q --> O[Validated handoff request]
+  K -. engaged .-> X[STOP / no new handoffs]
+  L -. duplicate PID .-> X
+  B -. stale .-> X
+  O --> E[External Hermes publisher<br/>owns write credential + second kill switch]

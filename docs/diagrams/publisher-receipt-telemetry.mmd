@@ -1,0 +1,26 @@
+sequenceDiagram
+  participant S as Sol engine
+  participant O as SQLite + file outbox
+  participant H as Hermes publisher agent
+  participant M as Moltbook write API
+  participant P as Receipt processor
+  participant T as Marx telemetry source
+
+  S->>O: persist QA-passed COMMENT
+  S->>O: handoff prepare(action_id, scoped grant)
+  O-->>H: MOLTBOOK_ACTION_REQUEST v1
+  H->>H: verify account, grant, action/body/target hashes
+  H->>M: exact comment bytes, one bounded write
+  M-->>H: provider response/readback
+  H-->>P: MOLTBOOK_PUBLICATION_RECEIPT v1
+  P->>P: verify request/action/body/target/account/receipt hashes
+  alt PUBLISHED + verified
+    P->>O: persist publication evidence
+    P->>O: acknowledge action_id
+  else FAILED / verification / uncertain
+    P->>O: persist failure and quarantine
+    P-->>H: no blind retry
+  end
+  T-->>P: verified reply/reaction/investigation/interaction/usage events
+  P->>O: immutable outcome_events + attributed Outcome
+  O->>S: verified-only strategy learning input

@@ -20,12 +20,44 @@ export type RuntimeConfig = {
     retry_backoff_ms?: number;
     max_concurrency?: number;
   };
+  source?: {
+    mode?: "disabled" | "live_read_only" | "authorized_autonomous";
+    api_base_url?: string;
+    secret_provider?: "macos-keychain" | "environment";
+    api_key_environment_variable?: string;
+    keychain_service?: string;
+    keychain_account?: string;
+    request_timeout_ms?: number;
+    max_pages?: number;
+  };
   storage?: { database_path?: string; strategy_stats_path?: string };
   publishing?: {
     enabled?: boolean;
     mode?: string;
     platform?: string;
     outbox?: { pending_path?: string; acknowledged_path?: string; failed_path?: string };
+  };
+  publisher_bridge?: {
+    enabled?: boolean;
+    type?: "hermes_outbox";
+    binary?: string;
+    provider?: string;
+    model?: string;
+    reasoning_effort?: string;
+    handoff_path?: string;
+    contract_secret_provider?: "macos-keychain" | "environment";
+    contract_secret_environment_variable?: string;
+    contract_keychain_service?: string;
+    contract_keychain_account?: string;
+    contract_key_id?: string;
+  };
+  operations?: {
+    runtime_directory?: string;
+    supervisor_lock_path?: string;
+    heartbeat_path?: string;
+    kill_switch_path?: string;
+    kill_switch_audit_path?: string;
+    heartbeat_stale_after_ms?: number;
   };
   safety?: { allowed_domains?: string[]; allowed_redirect_domains?: string[] };
   strategy_selection?: { exploration_rate?: number };
@@ -74,7 +106,7 @@ export type ExperimentsConfig = {
   };
   strategy_families?: string[];
   tracking?: { strategy_stats_path?: string; dimensions?: string[]; outcome_signals?: string[] };
-  learning?: { optimize_for?: string[]; retain_exploration?: boolean };
+  learning?: { optimize_for?: string[]; retain_exploration?: boolean; update_priors_after_verified_outcome_import?: boolean };
 };
 
 export type RuntimeSettings = { system: RuntimeConfig; submolts: SubmoltsConfig; experiments: ExperimentsConfig };
@@ -115,6 +147,16 @@ export const DEFAULT_RUNTIME_THRESHOLDS: ResolvedRuntimeThresholds = {
 };
 
 const DEFAULT_SUBMOLTS = { includeSubmolts: [] as string[], excludeSubmolts: [] as string[], lookbackHours: 24, candidateLimit: 100 };
+const CANONICAL_OUTCOME_SIGNALS = new Set([
+  "reply_received",
+  "reply_latency_seconds",
+  "reaction_count",
+  "target_agent_engaged",
+  "marx_mentioned_by_target",
+  "marx_investigated",
+  "marx_interacted",
+  "marx_used",
+]);
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -152,7 +194,10 @@ function validateConfig(value: unknown): RuntimeConfig {
   if (!config) throw new Error("system config must contain a YAML object");
   const execution = object(config.execution);
   const model = object(config.model);
+  const source = object(config.source);
   const publishing = object(config.publishing);
+  const publisherBridge = object(config.publisher_bridge);
+  const operations = object(config.operations);
   const safety = object(config.safety);
   const observability = object(config.observability);
   const thresholds = object(config.thresholds);
@@ -164,7 +209,20 @@ function validateConfig(value: unknown): RuntimeConfig {
   nonNegativeInteger("config.model.max_retries", model?.max_retries, 2);
   nonNegativeInteger("config.model.retry_backoff_ms", model?.retry_backoff_ms, 1_000);
   positiveInteger("config.model.max_concurrency", model?.max_concurrency, 3);
+  if (source?.mode !== undefined && !["disabled", "live_read_only", "authorized_autonomous"].includes(String(source.mode))) throw new Error("config.source.mode must be disabled, live_read_only, or authorized_autonomous");
+  if (source?.secret_provider !== undefined && !["macos-keychain", "environment"].includes(String(source.secret_provider))) throw new Error("config.source.secret_provider must be macos-keychain or environment");
+  if (source?.api_base_url !== undefined && typeof source.api_base_url !== "string") throw new Error("config.source.api_base_url must be a string");
+  positiveInteger("config.source.request_timeout_ms", source?.request_timeout_ms, 15_000);
+  positiveInteger("config.source.max_pages", source?.max_pages, 4);
   if (publishing?.enabled !== undefined && typeof publishing.enabled !== "boolean") throw new Error("config.publishing.enabled must be boolean");
+  if (publisherBridge?.enabled !== undefined && typeof publisherBridge.enabled !== "boolean") throw new Error("config.publisher_bridge.enabled must be boolean");
+  if (publisherBridge?.type !== undefined && publisherBridge.type !== "hermes_outbox") throw new Error("config.publisher_bridge.type must be hermes_outbox");
+  if (publisherBridge?.contract_secret_provider !== undefined && !["macos-keychain", "environment"].includes(String(publisherBridge.contract_secret_provider))) throw new Error("config.publisher_bridge.contract_secret_provider must be macos-keychain or environment");
+  if (publisherBridge?.contract_secret_environment_variable !== undefined && (typeof publisherBridge.contract_secret_environment_variable !== "string" || !/^[A-Z][A-Z0-9_]*$/u.test(publisherBridge.contract_secret_environment_variable))) throw new Error("config.publisher_bridge.contract_secret_environment_variable must be an uppercase environment variable name");
+  for (const [name, value] of [["contract_keychain_service", publisherBridge?.contract_keychain_service], ["contract_keychain_account", publisherBridge?.contract_keychain_account], ["contract_key_id", publisherBridge?.contract_key_id]] as const) {
+    if (value !== undefined && (typeof value !== "string" || value.trim() === "")) throw new Error(`config.publisher_bridge.${name} must be a non-empty string`);
+  }
+  positiveInteger("config.operations.heartbeat_stale_after_ms", operations?.heartbeat_stale_after_ms, 900_000);
   stringList("config.safety.allowed_domains", safety?.allowed_domains);
   stringList("config.safety.allowed_redirect_domains", safety?.allowed_redirect_domains);
   fraction("config.thresholds.minimum_opportunity_score", thresholds?.minimum_opportunity_score, DEFAULT_RUNTIME_THRESHOLDS.minimumOpportunityScore);
@@ -196,11 +254,21 @@ function validateExperimentsConfig(value: unknown): ExperimentsConfig {
   if (!config) throw new Error("experiments config must contain a YAML object");
   const generation = object(config.candidate_generation);
   const selection = object(config.strategy_selection);
+  const tracking = object(config.tracking);
+  const learning = object(config.learning);
   positiveInteger("config.candidate_generation.count", generation?.count, 4);
   fraction("config.strategy_selection.exploration_rate", selection?.exploration_rate, 0.25);
   fraction("config.strategy_selection.exploitation_rate", selection?.exploitation_rate, 0.75);
   nonNegativeInteger("config.strategy_selection.minimum_observations_before_exploitation", selection?.minimum_observations_before_exploitation, 20);
   stringList("config.strategy_families", config.strategy_families);
+  const outcomeSignals = stringList("config.tracking.outcome_signals", tracking?.outcome_signals);
+  const optimizeFor = stringList("config.learning.optimize_for", learning?.optimize_for);
+  for (const signal of [...outcomeSignals, ...optimizeFor]) {
+    if (!CANONICAL_OUTCOME_SIGNALS.has(signal)) throw new Error(`Unknown outcome signal: ${signal}`);
+  }
+  if (learning?.update_priors_after_verified_outcome_import !== undefined && typeof learning.update_priors_after_verified_outcome_import !== "boolean") {
+    throw new Error("config.learning.update_priors_after_verified_outcome_import must be boolean");
+  }
   return config as ExperimentsConfig;
 }
 

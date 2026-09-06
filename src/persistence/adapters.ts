@@ -6,6 +6,7 @@ import {
   ExperimentSchema,
   GeneratedCandidateSchema,
   MoltbookPostSchema,
+  MarxOutcomeEventSchema,
   OpportunitySchema,
   PostContextSchema,
   RunSchema,
@@ -16,6 +17,7 @@ import {
   type Evaluation,
   type Experiment,
   type MoltbookPost,
+  type MarxOutcomeEvent,
   type Opportunity as PersistedOpportunity,
   type PostContext,
   type Run,
@@ -288,4 +290,8 @@ export function canonicalContext(value: unknown): PostContext {
 
 export function canonicalConversation(value: unknown): ConversationContext {
   return ConversationContextSchema.parse(value);
+}
+
+export function adaptOutcomeEvent(value: unknown): MarxOutcomeEvent {
+  return MarxOutcomeEventSchema.parse(value);
 }

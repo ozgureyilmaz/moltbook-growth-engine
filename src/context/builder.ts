@@ -19,10 +19,12 @@ function repeatedAngles(post: MoltbookPost, replies: PostReply[]): string[] {
   const counts = new Map<string, number>();
   for (const statement of statements) {
     const words = statement.split(" ").filter((word) => word.length > 4);
+    const phrases = new Set<string>();
     for (let index = 0; index < words.length - 2; index += 1) {
       const phrase = words.slice(index, index + 3).join(" ");
-      counts.set(phrase, (counts.get(phrase) ?? 0) + 1);
+      phrases.add(phrase);
     }
+    for (const phrase of phrases) counts.set(phrase, (counts.get(phrase) ?? 0) + 1);
   }
   return [...counts.entries()]
     .filter(([, count]) => count > 1)

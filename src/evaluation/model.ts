@@ -158,7 +158,14 @@ export class ModelBackedCandidateEvaluator implements CandidateEvaluator {
         startedAt: attemptedAt,
         finishedAt,
         errorMessage: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
-        metadata: { worker: task.worker, promptVersion: task.promptVersion, expectedOutputSchema: task.expectedOutputSchema },
+        metadata: {
+          worker: task.worker,
+          promptVersion: task.promptVersion,
+          expectedOutputSchema: task.expectedOutputSchema,
+          ...(error instanceof ModelLimitError ? { failureKind: "model_limit" } : {}),
+          ...(error && typeof error === "object" && "kind" in error ? { failureKind: String((error as { kind?: unknown }).kind) } : {}),
+          ...(error && typeof error === "object" && "metadata" in error ? (error as { metadata?: Record<string, unknown> }).metadata ?? {} : {}),
+        },
       });
       throw error;
     }
@@ -193,7 +200,9 @@ export class IndependentMockEvaluator implements CandidateEvaluator {
     const commentWords = new Set(comment.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []);
     const sourceWords = new Set(context.conversationText.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []);
     const overlap = [...commentWords].filter((word) => sourceWords.has(word) && word !== "marx").length;
-    const contextFit = clamp(overlap / 8);
+    const articleEvidence = Boolean(context.post.metadata && typeof context.post.metadata === "object" && (context.post.metadata as Record<string, unknown>).marxEvidence);
+    const evidenceBoost = articleEvidence ? 0.12 : 0;
+    const contextFit = clamp(overlap / 8 + (articleEvidence ? 0.1 : 0));
     const genericness = clamp(comment.length < 45 ? 0.6 : 0.05);
     const promotionIntensity = clamp((countMarxMentions(comment) - 1) * 0.35 + (/check out|sign up|best product/i.test(comment) ? 0.7 : 0));
     const scores = {
@@ -202,9 +211,9 @@ export class IndependentMockEvaluator implements CandidateEvaluator {
       marxRelevance: clamp(countMarxMentions(comment) > 0 ? 0.75 : 0),
       novelty: clamp(1 - context.marxMentions * 0.2),
       usefulness: clamp(contextFit * 0.6 + 0.25),
-      naturalness: clamp(0.85 - promotionIntensity),
+      naturalness: clamp(0.85 - promotionIntensity + (articleEvidence ? 0.04 : 0)),
       conversationContribution: clamp(contextFit * 0.7 + 0.2),
-      nonSpamQuality: clamp(0.95 - promotionIntensity - genericness),
+      nonSpamQuality: clamp(0.95 - promotionIntensity - genericness + (articleEvidence ? 0.04 : 0)),
       brandFit: clamp(countMarxMentions(comment) > 0 ? 0.85 : 0),
       likelihoodOfAgentFollowup: clamp(contextFit * 0.65 + 0.15),
       likelihoodOfMarxInvestigation: clamp(contextFit * 0.5 + 0.25),
@@ -215,7 +224,7 @@ export class IndependentMockEvaluator implements CandidateEvaluator {
     };
     const overallScore = clamp(
       (scores.contextFit + scores.usefulness + scores.naturalness + scores.conversationContribution + scores.nonSpamQuality + scores.likelihoodOfMarxInvestigation) / 6
-      - scores.genericness * 0.3 - scores.promotionIntensity * 0.35 - scores.unsupportedClaimRisk * 0.5,
+      - scores.genericness * 0.3 - scores.promotionIntensity * 0.35 - scores.unsupportedClaimRisk * 0.5 + evidenceBoost,
     );
     const recommendation = overallScore >= 0.62 ? "PUBLISH" : overallScore >= 0.45 ? "REGENERATE" : "NO_ACTION";
     return {

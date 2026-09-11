@@ -74,6 +74,29 @@ describe("MoltbookHttpClient", () => {
     ]);
   });
 
+  it("supports public GET-only semantic search without resolving a secret", async () => {
+    const fetchMock = vi.fn(async () => json({ success: true, results: [{
+      type: "post",
+      post_id: "search-post",
+      title: "Warsh and inflation",
+      content: "Rate repricing matters.",
+      author: { id: "agent-search", name: "search-agent" },
+      submolt: { name: "finance", display_name: "Finance" },
+      created_at: "2026-08-27T12:00:00.000Z",
+      upvotes: 2,
+      downvotes: 0,
+      comment_count: 1,
+    }] })) as typeof fetch;
+    const client = new MoltbookHttpClient({
+      secretProvider: new EnvironmentSecretProvider(),
+      secretReference: { name: "unused" },
+      publicReadOnly: true,
+      fetch: fetchMock,
+    });
+    await expect(client.searchPosts("Fed inflation rate hike", 5)).resolves.toEqual([expect.objectContaining({ postId: "search-post", submolt: "finance" })]);
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("authorization")).toBeNull();
+  });
+
   it("fails closed on other origins and redacts secrets from provider errors", async () => {
     expect(() => new MoltbookHttpClient({
       secretProvider: new EnvironmentSecretProvider(),
@@ -115,22 +138,30 @@ describe("MoltbookHttpClient", () => {
     expect(attempts).toBe(2);
   });
 
-  it("treats malformed JSON and denied redirects as terminal read failures", async () => {
-    for (const fetchMock of [
-      vi.fn(async () => new Response("not-json", { status: 200, headers: { "content-type": "application/json" } })),
-      vi.fn(async () => { throw new TypeError("redirect mode is set to error"); }),
-    ]) {
-      const client = new MoltbookHttpClient({
-        secretProvider: new EnvironmentSecretProvider({ MOLTBOOK_API_KEY: "secret-value" }),
-        secretReference: { name: "read-key", environmentVariable: "MOLTBOOK_API_KEY" },
-        fetch: fetchMock as typeof fetch,
-      });
-      const source = new AuthorizedMoltbookSource(client, { authorized: true, allowedDomains: ["www.moltbook.com"], maxAttempts: 3 });
-      const error = await source.discoverPosts({ limit: 1 }).catch((value: unknown) => value);
-      expect(error).toBeInstanceOf(MoltbookHttpError);
-      expect((error as MoltbookHttpError).retryable).toBe(false);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    }
+  it("retries malformed JSON but keeps denied redirects terminal", async () => {
+    const malformedFetch = vi.fn(async () => new Response("not-json", { status: 200, headers: { "content-type": "application/json" } }));
+    const malformedClient = new MoltbookHttpClient({
+      secretProvider: new EnvironmentSecretProvider({ MOLTBOOK_API_KEY: "secret-value" }),
+      secretReference: { name: "read-key", environmentVariable: "MOLTBOOK_API_KEY" },
+      fetch: malformedFetch as typeof fetch,
+    });
+    const malformedSource = new AuthorizedMoltbookSource(malformedClient, { authorized: true, allowedDomains: ["www.moltbook.com"], maxAttempts: 3, retryBackoffMs: 0 });
+    const malformedError = await malformedSource.discoverPosts({ limit: 1 }).catch((value: unknown) => value);
+    expect(malformedError).toBeInstanceOf(MoltbookHttpError);
+    expect((malformedError as MoltbookHttpError).retryable).toBe(true);
+    expect(malformedFetch).toHaveBeenCalledTimes(3);
+
+    const redirectFetch = vi.fn(async () => { throw new TypeError("redirect mode is set to error"); });
+    const redirectClient = new MoltbookHttpClient({
+      secretProvider: new EnvironmentSecretProvider({ MOLTBOOK_API_KEY: "secret-value" }),
+      secretReference: { name: "read-key", environmentVariable: "MOLTBOOK_API_KEY" },
+      fetch: redirectFetch as typeof fetch,
+    });
+    const redirectSource = new AuthorizedMoltbookSource(redirectClient, { authorized: true, allowedDomains: ["www.moltbook.com"], maxAttempts: 3 });
+    const redirectError = await redirectSource.discoverPosts({ limit: 1 }).catch((value: unknown) => value);
+    expect(redirectError).toBeInstanceOf(MoltbookHttpError);
+    expect((redirectError as MoltbookHttpError).retryable).toBe(false);
+    expect(redirectFetch).toHaveBeenCalledTimes(1);
   });
 
   it("rejects context returned for a different post", async () => {

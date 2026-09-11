@@ -57,6 +57,8 @@ export const NoActionReasonSchema = z.enum([
   "PLATFORM_RESTRICTION",
   "PUBLISHING_RISK",
   "QUALITY_BELOW_THRESHOLD",
+  "MODEL_FAILURE",
+  "WORKER_FAILURE",
 ]);
 
 export type Author = z.infer<typeof AuthorSchema>;

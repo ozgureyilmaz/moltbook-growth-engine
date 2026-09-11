@@ -91,4 +91,124 @@ describe("bounded Sol/Luna worker orchestration", () => {
     expect(reports.some((report) => Number(report.metrics?.modelWorkerCalls ?? 0) > 0)).toBe(true);
     expect(modelRuns.length).toBeGreaterThan(0);
   });
+
+  it("keeps a broad opportunity pool but stops real-model generation after five accepted actions", async () => {
+    const posts = Array.from({ length: 28 }, (_, index) => ({
+      postId: `shortlist-post-${index + 1}`,
+      url: `https://moltbook.local/post/shortlist-post-${index + 1}`,
+      submolt: "markets",
+      author: { id: `shortlist-agent-${index + 1}`, name: `shortlist-agent-${index + 1}`, type: "agent" },
+      content: "Agents compare evidence and market signal provenance before making a decision.",
+      createdAt: "2026-08-24T00:30:00.000Z",
+      fetchedAt: "2026-08-24T00:35:00.000Z",
+      engagement: { replies: 8, reactions: 12 },
+    }));
+    let generationCalls = 0;
+    let evaluationCalls = 0;
+    let generationTimeout: number | undefined;
+    const executor = new DeterministicMockExecutor({
+      maxAttempts: 1,
+      maxConcurrent: 2,
+      handler: async (task) => {
+        if (task.kind === "candidate_generation") {
+          generationCalls += 1;
+          generationTimeout = task.timeoutMs;
+          const input = task.input as { allowedStrategyFamilies?: string[] };
+          return {
+            candidates: [{
+              strategyFamily: input.allowedStrategyFamilies?.[0] ?? "provenance",
+              hookFamily: "specific_claim",
+              comment: "Marx adds a concrete provenance check to this market signal before agents act: compare which independent sources each agent saw before treating agreement as evidence.",
+            }],
+          };
+        }
+        if (task.kind === "candidate_evaluation") {
+          evaluationCalls += 1;
+          const scoreKeys = ["contextFit", "agentInterestProbability", "marxRelevance", "novelty", "usefulness", "naturalness", "conversationContribution", "nonSpamQuality", "brandFit", "likelihoodOfAgentFollowup", "likelihoodOfMarxInvestigation", "genericness", "promotionIntensity", "repetition", "unsupportedClaimRisk"];
+          return {
+            scores: Object.fromEntries(scoreKeys.map((key) => [key, key === "genericness" || key === "promotionIntensity" || key === "repetition" || key === "unsupportedClaimRisk" ? 0.02 : 0.95])),
+            overallScore: 0.95,
+            confidence: 0.95,
+            recommendation: "PUBLISH",
+            reasons: ["bounded model fixture"],
+          };
+        }
+        throw new Error(`unexpected model task kind: ${task.kind}`);
+      },
+    });
+    const reports: WorkerReport[] = [];
+    const result = await new SolOrchestrator(new FixtureMoltbookSource({ posts }), {
+      saveWorkerReport: (report) => reports.push(report),
+    }).run({
+      runId: "bounded-specific-generation",
+      dryRun: true,
+      evaluationMode: "real_model",
+      modelExecutor: executor,
+      modelGenerateComments: true,
+      discoveryLimit: 100,
+      targetActions: 5,
+      fillTargetActions: true,
+      strategyGenerationBatchSize: 5,
+      strategyGenerationTaskBudget: 10,
+      scoringThreshold: 0,
+      workerMaxAttempts: 1,
+      modelMaxAttempts: 1,
+      modelTimeoutMs: 120_000,
+      now: "2026-08-24T01:00:00.000Z",
+    });
+
+    expect(result.summary.discovered).toBe(28);
+    expect(result.summary.qualified).toBe(28);
+    expect(result.summary.actionsEmitted).toBe(5);
+    expect(result.summary.errors).toBe(0);
+    expect(generationCalls).toBe(5);
+    expect(evaluationCalls).toBe(5);
+    expect(generationTimeout).toBe(120_000);
+    expect(reports.filter((report) => report.worker === "strategy_generation")).toHaveLength(5);
+  });
+
+  it("stops the strategy pipeline after the configured consecutive worker failure budget", async () => {
+    const posts = Array.from({ length: 5 }, (_, index) => ({
+      postId: `failure-budget-post-${index + 1}`,
+      url: `https://moltbook.local/post/failure-budget-post-${index + 1}`,
+      submolt: "markets",
+      author: { id: `failure-budget-agent-${index + 1}`, name: `failure-budget-agent-${index + 1}`, type: "agent" as const },
+      content: "Agents compare evidence and market signal provenance before making a decision.",
+      createdAt: "2026-08-24T00:30:00.000Z",
+      fetchedAt: "2026-08-24T00:35:00.000Z",
+    }));
+    let generationCalls = 0;
+    const executor = new DeterministicMockExecutor({
+      maxAttempts: 1,
+      handler: async (task) => {
+        if (task.kind === "candidate_generation") {
+          generationCalls += 1;
+          throw new Error("model unavailable");
+        }
+        throw new Error(`unexpected model task kind: ${task.kind}`);
+      },
+    });
+
+    const result = await new SolOrchestrator(new FixtureMoltbookSource({ posts })).run({
+      runId: "strategy-failure-budget",
+      dryRun: true,
+      evaluationMode: "real_model",
+      modelExecutor: executor,
+      modelGenerateComments: true,
+      discoveryLimit: 5,
+      targetActions: 5,
+      fillTargetActions: true,
+      strategyGenerationBatchSize: 1,
+      strategyGenerationTaskBudget: 5,
+      strategyGenerationFailureBudget: 2,
+      scoringThreshold: 0,
+      workerMaxAttempts: 1,
+      modelMaxAttempts: 1,
+      now: "2026-08-24T01:00:00.000Z",
+    });
+
+    expect(generationCalls).toBe(2);
+    expect(result.summary.errors).toBe(2);
+    expect(result.summary.actionsEmitted).toBe(0);
+  });
 });

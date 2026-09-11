@@ -35,6 +35,19 @@ describe("CLI and growth observability handoff", () => {
     expect(parseArgs(["run", "--fixture", fixturePath, "--dry-run", "--real-model"]).options).toMatchObject({ "real-model": true });
   });
 
+  it("reports the publication-free real-model smoke check", async () => {
+    const output: string[] = [];
+    const report = await runCli(["doctor", "--model-smoke"], {
+      persistence: {},
+      modelSmoke: async () => ({ status: "PASS", model: "gpt-5.6-luna", attempts: 1, elapsedMs: 42 }),
+      stdout: (line) => output.push(line),
+    });
+
+    expect(report).toContain("codex-real-model-smoke");
+    expect(report).toContain("PASS");
+    expect(output).toHaveLength(1);
+  });
+
   it("keeps fixture runs local, carries run context, and labels mock evaluation truthfully", async () => {
     const fixture = JSON.parse(await readFile(fixturePath, "utf8")) as ConstructorParameters<typeof FixtureMoltbookSource>[0];
     const contexts: RunContext[] = [];

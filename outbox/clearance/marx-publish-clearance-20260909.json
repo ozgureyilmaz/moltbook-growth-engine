@@ -1,0 +1,9 @@
+{
+  "authorizationId": "clearance_20260909205907896_030f1a43",
+  "actor": "ozgur",
+  "issuedAt": "2026-09-09T20:59:07.876Z",
+  "expiresAt": "2026-09-09T22:59:07.876Z",
+  "reason": "bounded live publishing pilot",
+  "signatureKeyId": "contract-v1",
+  "signature": "46fced99767b3a2490796290955b301bd725f45be8c017d905271ac3497e0dae"
+}

@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { z } from "zod";
 import { requireSecret, type SecretProvider, type SecretReference } from "../secrets";
 import type { DiscoveryRequest, MoltbookPost, PostContext, PostReply } from "../orchestrator/contracts";
@@ -31,6 +32,7 @@ const RawPostSchema = z.object({
   downvotes: z.number().int().nonnegative().optional(),
   score: z.number().optional(),
   comment_count: z.number().int().nonnegative().optional(),
+  relevance: z.number().optional(),
   is_deleted: z.boolean().optional(),
   is_spam: z.boolean().optional(),
   verification_status: z.string().optional(),
@@ -77,6 +79,20 @@ const PostListResponseSchema = z.object({
 
 const PostResponseSchema = z.object({ success: z.literal(true), post: RawPostSchema }).passthrough();
 const CommentsResponseSchema = z.object({ success: z.literal(true), comments: z.array(RawCommentSchema), next_cursor: z.string().optional() }).passthrough();
+const SearchResultSchema = z.object({
+  id: z.string().optional(),
+  post_id: z.string().optional(),
+  type: z.literal("post"),
+  title: z.string().optional(),
+  content: z.string().optional(),
+  author: RawAuthorSchema.optional(),
+  submolt: z.object({ name: z.string().min(1), display_name: z.string().optional() }).passthrough(),
+  created_at: z.string().datetime({ offset: true }),
+  upvotes: z.number().int().nonnegative().optional(),
+  downvotes: z.number().int().nonnegative().optional(),
+  comment_count: z.number().int().nonnegative().optional(),
+}).passthrough();
+const SearchResponseSchema = z.object({ success: z.literal(true), results: z.array(SearchResultSchema) }).passthrough();
 
 export class MoltbookHttpError extends Error {
   public constructor(
@@ -97,6 +113,8 @@ export type MoltbookHttpClientOptions = {
   timeoutMs?: number;
   fetch?: typeof fetch;
   allowTestBaseUrl?: boolean;
+  /** Public GET-only mode. It never attempts to resolve or send a secret. */
+  publicReadOnly?: boolean;
   now?: () => Date;
 };
 
@@ -110,7 +128,11 @@ export class MoltbookHttpClient implements AuthorizedMoltbookClient {
   public constructor(private readonly options: MoltbookHttpClientOptions) {
     this.baseUrl = validateBaseUrl(options.baseUrl ?? OFFICIAL_MOLTBOOK_API_BASE_URL, options.allowTestBaseUrl === true);
     this.timeoutMs = positiveInteger("Moltbook request timeout", options.timeoutMs ?? 15_000);
-    this.fetchImpl = options.fetch ?? fetch;
+    // The macOS runtime used by the Hermes host can reach Moltbook through
+    // curl while Node's native fetch intermittently stalls at the TLS connect.
+    // Keep injected fetches for tests, but use the stdin-configured curl
+    // transport for the official production read boundary.
+    this.fetchImpl = options.fetch ?? curlFetch;
     this.now = options.now ?? (() => new Date());
   }
 
@@ -129,6 +151,17 @@ export class MoltbookHttpClient implements AuthorizedMoltbookClient {
       posts: parsed.posts.filter((post) => !post.is_deleted && !post.is_spam).map((post) => this.toPost(post)),
       ...(parsed.has_more && parsed.next_cursor ? { nextCursor: parsed.next_cursor } : {}),
     };
+  }
+
+  public async searchPosts(query: string, limit = 20): Promise<unknown[]> {
+    const normalized = query.trim();
+    if (!normalized || normalized.length > 500) throw new Error("Moltbook search query must contain 1-500 characters");
+    const url = this.endpoint("search");
+    url.searchParams.set("q", normalized);
+    url.searchParams.set("type", "posts");
+    url.searchParams.set("limit", String(Math.min(50, Math.max(1, limit))));
+    const parsed = SearchResponseSchema.parse(await this.getJson(url));
+    return parsed.results.map((result) => this.toSearchPost(result));
   }
 
   public async fetchPostContext(postId: string): Promise<unknown> {
@@ -157,7 +190,7 @@ export class MoltbookHttpClient implements AuthorizedMoltbookClient {
 
   private async getJson(url: URL): Promise<unknown> {
     assertWithinBase(url, this.baseUrl);
-    const apiKey = await requireSecret(this.options.secretProvider, this.options.secretReference);
+    const apiKey = this.options.publicReadOnly ? undefined : await requireSecret(this.options.secretProvider, this.options.secretReference);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -165,7 +198,7 @@ export class MoltbookHttpClient implements AuthorizedMoltbookClient {
         method: "GET",
         redirect: "error",
         signal: controller.signal,
-        headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}`, "User-Agent": "marx-moltbook-growth-engine/0.1" },
+        headers: { Accept: "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), "User-Agent": "marx-moltbook-growth-engine/0.2" },
       });
       if (!response.ok) {
         const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
@@ -179,7 +212,11 @@ export class MoltbookHttpClient implements AuthorizedMoltbookClient {
       try {
         return await response.json() as unknown;
       } catch {
-        throw new MoltbookHttpError("Moltbook read response contained malformed JSON", response.status, false);
+        // A transient edge/challenge response can be HTTP 200 while not
+        // containing the expected JSON envelope. Keep the retry bounded at
+        // the authorized source boundary instead of treating that response
+        // as proof that the API contract is permanently broken.
+        throw new MoltbookHttpError("Moltbook read response contained malformed JSON", response.status, true);
       }
     } catch (error) {
       if (error instanceof MoltbookHttpError) throw error;
@@ -219,6 +256,109 @@ export class MoltbookHttpClient implements AuthorizedMoltbookClient {
       },
     };
   }
+
+  private toSearchPost(raw: z.infer<typeof SearchResultSchema>): MoltbookPost {
+    const postId = raw.post_id ?? raw.id;
+    if (!postId) throw new Error("Moltbook search result did not contain a post id");
+    const fetchedAt = this.now().toISOString();
+    return {
+      postId,
+      url: `https://www.moltbook.com/post/${encodeURIComponent(postId)}`,
+      submolt: raw.submolt.name,
+      author: { ...(raw.author?.id ? { id: raw.author.id } : {}), ...(raw.author?.name ? { name: raw.author.name } : {}), type: "agent" },
+      content: [raw.title?.trim(), raw.content?.trim()].filter(Boolean).join("\n\n"),
+      createdAt: raw.created_at,
+      fetchedAt,
+      engagement: { replies: raw.comment_count ?? 0, reactions: Math.max(0, (raw.upvotes ?? 0) - (raw.downvotes ?? 0)) },
+      metadata: { source: "moltbook-official-search", searchType: "posts", submoltDisplayName: raw.submolt.display_name, searchRelevance: raw.relevance },
+    };
+  }
+}
+
+type CurlFetchInput = Parameters<typeof fetch>[0];
+type CurlFetchInit = Parameters<typeof fetch>[1];
+
+function curlFetch(input: CurlFetchInput, init?: CurlFetchInit): Promise<Response> {
+  const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url);
+  const method = String(init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  if (method !== "GET") throw new Error("Moltbook curl transport is GET-only");
+  const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+  const config = [
+    `url = ${curlConfigQuote(url.href)}`,
+    "request = GET",
+    "proto = https",
+    "max-redirs = 0",
+    // The host can transiently fail TCP connects while the browser remains
+    // reachable. Keep this transport-level retry small and bounded; HTTP
+    // responses still flow through the status-aware application retry policy.
+    "retry = 2",
+    "retry-delay = 1",
+    "retry-max-time = 12",
+    "retry-connrefused",
+    "silent",
+    "show-error",
+    "connect-timeout = 10",
+    "max-time = 20",
+    `write-out = ${curlConfigQuote("%{stderr}__MARX_STATUS__:%{http_code}__MARX_HEADERS__:%{header_json}")}`,
+    ...Array.from(headers.entries()).map(([name, value]) => `header = ${curlConfigQuote(`${name}: ${value}`)}`),
+  ].join("\n");
+
+  return new Promise<Response>((resolve, reject) => {
+    const child = spawn("/usr/bin/curl", ["--config", "-"], { stdio: ["pipe", "pipe", "pipe"] });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let settled = false;
+    const finishFailure = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    const abort = (): void => {
+      child.kill("SIGTERM");
+      finishFailure(new Error("Moltbook curl request aborted"));
+    };
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.on("error", (error) => finishFailure(error instanceof Error ? error : new Error(String(error))));
+    child.on("close", (code) => {
+      if (settled) return;
+      const diagnostics = Buffer.concat(stderr).toString("utf8");
+      const marker = diagnostics.lastIndexOf("__MARX_STATUS__:");
+      const statusText = marker >= 0 ? diagnostics.slice(marker + "__MARX_STATUS__:".length).split("__MARX_HEADERS__:", 1)[0] : "";
+      const status = Number(statusText);
+      if (code !== 0 || !Number.isInteger(status) || status < 100) {
+        finishFailure(new Error(`Moltbook curl request failed${diagnostics ? `: ${diagnostics.replace(/__MARX_STATUS__:[\s\S]*$/u, "").trim()}` : ""}`));
+        return;
+      }
+      const headerStart = diagnostics.lastIndexOf("__MARX_HEADERS__:");
+      const responseHeaders = new Headers();
+      if (headerStart >= 0) {
+        const rawHeaders = diagnostics.slice(headerStart + "__MARX_HEADERS__:".length).trim();
+        try {
+          const parsedHeaders = JSON.parse(rawHeaders) as Record<string, string | string[]>;
+          for (const [name, value] of Object.entries(parsedHeaders)) responseHeaders.set(name, Array.isArray(value) ? value.join(", ") : value);
+        } catch {
+          finishFailure(new Error("Moltbook curl response headers were malformed"));
+          return;
+        }
+      }
+      settled = true;
+      resolve(new Response(Buffer.concat(stdout), { status, headers: responseHeaders }));
+    });
+    if (init?.signal) {
+      if (init.signal.aborted) {
+        abort();
+        return;
+      }
+      init.signal.addEventListener("abort", abort, { once: true });
+      child.once("close", () => init.signal?.removeEventListener("abort", abort));
+    }
+    child.stdin.end(config, "utf8");
+  });
+}
+
+function curlConfigQuote(value: string): string {
+  return `"${value.replace(/([\\"])/gu, "\\$1").replace(/[\r\n]/gu, " ")}"`;
 }
 
 function validateBaseUrl(value: string, allowTestBaseUrl: boolean): URL {

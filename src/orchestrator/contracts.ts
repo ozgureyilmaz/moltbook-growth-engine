@@ -7,7 +7,7 @@
  */
 import type * as SharedDomain from "../domain";
 import type * as SharedPersistence from "../persistence";
-import type { MarxOutcomeEvent, ModelRunRecord, Outcome, Publication, StrategyStatistics } from "../schemas";
+import type { MarxOutcomeEvent, ModelRunRecord, Outcome, Publication, StrategyStatistics, TrackingDistribution } from "../schemas";
 
 export type DomainExports = typeof SharedDomain;
 export type PersistenceExports = typeof SharedPersistence;
@@ -123,6 +123,22 @@ export type GeneratedCandidate = DecisionAttribution & {
   modelVersion: string;
 };
 
+export type PublishableCandidatePreparation = {
+  candidate: GeneratedCandidate;
+  tracking?: { ref: string; trackingUrl: string; environment: "development" | "production" };
+  finalize: (action: ActionPayload, experiment: ExperimentRecord) => Promise<void>;
+};
+
+export type PublishableCandidatePreparer = (input: {
+  runId: string;
+  opportunity: Opportunity;
+  context: ConversationContext;
+  candidate: GeneratedCandidate;
+  evaluation: EvaluationResult;
+  previousComments: string[];
+  createdAt: string;
+}) => Promise<PublishableCandidatePreparation>;
+
 export type EvaluatorRecommendation = "PUBLISH" | "REGENERATE" | "NO_ACTION";
 
 export type EvaluationScores = {
@@ -212,7 +228,9 @@ export type NoActionDecision = {
     | "CONTEXT_MISSING"
     | "PLATFORM_RESTRICTION"
     | "PUBLISHING_RISK"
-    | "QUALITY_BELOW_THRESHOLD";
+    | "QUALITY_BELOW_THRESHOLD"
+    | "MODEL_FAILURE"
+    | "WORKER_FAILURE";
   target?: { postId: string; postUrl?: string };
   metadata: { createdAt: string; runId: string };
 };
@@ -327,6 +345,8 @@ export type PersistenceLike = {
   saveRun?: (run: RunSummary) => Promise<void> | void;
   saveWorkerReport?: (report: WorkerReport) => Promise<void> | void;
   savePublication?: (publication: Publication) => Promise<void> | void;
+  saveTrackingDistribution?: (distribution: TrackingDistribution) => Promise<void> | void;
+  getTrackingDistributionByActionId?: (actionId: string) => Promise<TrackingDistribution | undefined> | TrackingDistribution | undefined;
   saveOutcome?: (outcome: Outcome) => Promise<void> | void;
   saveOutcomeEvent?: (event: MarxOutcomeEvent) => Promise<void> | void;
   listOutcomeEvents?: (experimentId: string) => Promise<MarxOutcomeEvent[]> | MarxOutcomeEvent[];

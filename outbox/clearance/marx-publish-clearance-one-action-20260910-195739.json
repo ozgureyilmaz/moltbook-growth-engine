@@ -1,0 +1,9 @@
+{
+  "authorizationId": "clearance_20260910165740094_534b3dfa",
+  "actor": "operator",
+  "issuedAt": "2026-09-10T16:57:40.071Z",
+  "expiresAt": "2026-09-10T17:12:40.071Z",
+  "reason": "one-action real-model production validation",
+  "signatureKeyId": "contract-v1",
+  "signature": "73c8e880bdd13272c0e71b06afef6ad3c99ed194713097cdafc2c3f92172edc1"
+}

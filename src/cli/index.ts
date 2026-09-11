@@ -1,5 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   ConfiguredMoltbookSource,
   AuthorizedMoltbookSource,
@@ -8,17 +10,22 @@ import {
   MoltbookHttpClient,
   type MoltbookSource,
 } from "../discovery";
-import { SolOrchestrator, type ObservableRunSummary } from "../orchestrator";
+import { SolOrchestrator, type ObservableRunSummary, type OrchestratorOptions } from "../orchestrator";
 import { createRunId, runDaemon, runOnce, validateCronExpression } from "../scheduler";
 import type { MoltbookPost, PersistenceLike } from "../orchestrator";
 import { openRuntimePersistence } from "../persistence";
-import { loadRuntimeSettings, resolveRuntimeSettings, type RuntimeConfig, type ResolvedRuntimeSettings } from "../config";
+import { loadRuntimeSettings, resolveRuntimeSettings, type RuntimeConfig, type ResolvedRuntimeSettings, type TrackerEnvironmentConfig } from "../config";
 import { LocalOutbox } from "../outbox";
 import { buildDryRunRecord, createConfiguredLogger, ingestVerifiedOutcomeEvents, writeDryRunRecord, type JsonLogger, type OutcomeEvidencePersistence } from "../telemetry";
 import { StrategyStatsStore } from "../experiments";
 import { EnvironmentSecretProvider, MacOsKeychainSecretProvider, requireSecret, type SecretProvider } from "../secrets";
-import { commandHealthCheck, EmergencyKillSwitch, installTerminationHandlers, KillSwitchClearanceSchema, LocalSupervisor, runHealthChecks, signKillSwitchClearance, writableDirectoryCheck, type HealthCheckRunner } from "../operations";
+import { commandHealthCheck, EmergencyKillSwitch, installTerminationHandlers, KillSwitchClearanceSchema, LocalSupervisor, runCodexModelSmoke, runHealthChecks, signKillSwitchClearance, writableDirectoryCheck, type CodexModelSmokeResult, type HealthCheckRunner } from "../operations";
 import { buildMoltbookActionRequest, MoltbookPublicationReceiptSchema, PublicationReceiptProcessor, PublisherHandoffStore, verifyAutonomousGrant, type AutonomousGrant, type ContractVerificationOptions } from "../publisher";
+import { runArticleWorkflow } from "../article";
+import { buildSpecificMarxMarkdown, type SpecificMarxOutputRecord } from "../specific-cycle";
+import { createTrackedCandidatePreparer, MarxTrackerHttpClient, type MarxTrackerClient, type TrackingPreparationInput } from "../tracking";
+
+const execFileAsync = promisify(execFile);
 
 export type CliDependencies = {
   source?: ConstructorParameters<typeof SolOrchestrator>[0];
@@ -26,10 +33,12 @@ export type CliDependencies = {
   orchestrator?: SolOrchestrator;
   stdout?: (line: string) => void;
   configDirectory?: string;
+  trackerClient?: MarxTrackerClient;
+  modelSmoke?: () => Promise<CodexModelSmokeResult>;
 };
 
 export type ParsedCli = {
-  command: "run" | "status" | "experiments" | "replay" | "daemon" | "doctor" | "handoff" | "outcomes" | "ops";
+  command: "run" | "article-run" | "marx-specific-cycle" | "status" | "experiments" | "replay" | "daemon" | "doctor" | "handoff" | "outcomes" | "ops";
   options: Record<string, string | boolean>;
   positional: string[];
 };
@@ -43,7 +52,7 @@ export class CliExecutionError extends Error {
 
 export function parseArgs(argv: string[]): ParsedCli {
   const command = (argv[0] ?? "run") as ParsedCli["command"];
-  if (!["run", "status", "experiments", "replay", "daemon", "doctor", "handoff", "outcomes", "ops"].includes(command)) throw new Error(`Unknown command: ${command}`);
+  if (!["run", "article-run", "marx-specific-cycle", "status", "experiments", "replay", "daemon", "doctor", "handoff", "outcomes", "ops"].includes(command)) throw new Error(`Unknown command: ${command}`);
   const options: Record<string, string | boolean> = {};
   const positional: string[] = [];
   for (let index = 1; index < argv.length; index += 1) {
@@ -82,6 +91,22 @@ function booleanOption(value: string | boolean | undefined): boolean | undefined
 function evaluationModeOption(options: Record<string, string | boolean>): "deterministic_mock" | "real_model" | undefined {
   const realModel = booleanOption(options["real-model"]);
   return realModel === true ? "real_model" : realModel === false ? "deterministic_mock" : undefined;
+}
+
+/** Recovery-safe profile for the expensive specific-cycle model boundary. */
+export function specificRealModelRuntimeOptions(): Pick<OrchestratorOptions, "workerConcurrency" | "workerMaxAttempts" | "modelTimeoutMs" | "modelMaxAttempts" | "modelConcurrency" | "modelReasoningEffort" | "modelWorkingDirectory" | "strategyGenerationBatchSize" | "strategyGenerationTaskBudget" | "strategyGenerationFailureBudget"> {
+  return {
+    workerConcurrency: 1,
+    workerMaxAttempts: 1,
+    modelTimeoutMs: 120_000,
+    modelMaxAttempts: 1,
+    modelConcurrency: 1,
+    modelReasoningEffort: "low",
+    modelWorkingDirectory: "/tmp",
+    strategyGenerationBatchSize: 1,
+    strategyGenerationTaskBudget: 8,
+    strategyGenerationFailureBudget: 2,
+  };
 }
 
 type FixtureInput = { posts: MoltbookPost[]; contexts?: Record<string, unknown> };
@@ -142,6 +167,37 @@ function buildMoltbookClient(settings: ResolvedRuntimeSettings): MoltbookHttpCli
     },
     baseUrl: source?.api_base_url,
     timeoutMs: source?.request_timeout_ms,
+  });
+}
+
+async function buildTrackerClient(settings: ResolvedRuntimeSettings, environment: "development" | "production"): Promise<MarxTrackerHttpClient> {
+  const tracking = settings.system.tracking;
+  const environmentConfig: TrackerEnvironmentConfig | undefined = tracking?.[environment];
+  if (!environmentConfig) throw new Error(`Tracker ${environment} environment is not configured`);
+  const baseUrl = environmentConfig.base_url
+    ?? (environmentConfig.base_url_environment_variable ? process.env[environmentConfig.base_url_environment_variable]?.trim() : undefined);
+  if (!baseUrl) throw new Error(`Tracker ${environment} base URL is not configured`);
+  if (environment === "production" && new URL(baseUrl).origin !== "https://marx-tracker.marxx.workers.dev") {
+    throw new Error("Production tracker base URL must be https://marx-tracker.marxx.workers.dev");
+  }
+  if (environment === "development" && new URL(baseUrl).origin === "https://marx-tracker.marxx.workers.dev") {
+    throw new Error("Development tracker environment must not use the production tracker origin");
+  }
+  const provider: SecretProvider = environmentConfig.secret_provider === "environment"
+    ? new EnvironmentSecretProvider()
+    : new MacOsKeychainSecretProvider();
+  const token = await requireSecret(provider, {
+    name: `marx-tracker-${environment}-api-token`,
+    environmentVariable: environmentConfig.token_environment_variable,
+    keychainService: environmentConfig.keychain_service,
+    keychainAccount: environmentConfig.keychain_account,
+  });
+  return new MarxTrackerHttpClient({
+    baseUrl,
+    token,
+    timeoutMs: tracking?.request_timeout_ms,
+    maxAttempts: (tracking?.max_retries ?? 2) + 1,
+    retryBackoffMs: tracking?.retry_backoff_ms,
   });
 }
 
@@ -256,6 +312,64 @@ async function persistDryRunRecord(result: Awaited<ReturnType<SolOrchestrator["r
   await writeDryRunRecord(record, settings.system.observability?.run_log_directory ?? "logs/runs");
 }
 
+async function writeSpecificCycleOutput(
+  outputPath: string,
+  result: Awaited<ReturnType<typeof runArticleWorkflow>>,
+  persistence: PersistenceLike,
+  published: boolean,
+  includeAgentQuotes: boolean,
+): Promise<SpecificMarxOutputRecord[]> {
+  const records: SpecificMarxOutputRecord[] = [];
+  for (const action of result.actions) {
+    const publication = await persistence.getPublicationByActionId?.(action.actionId);
+    const tracking = await persistence.getTrackingDistributionByActionId?.(action.actionId);
+    const permalink = publication?.metadata?.permalink;
+    const publicationStatus = published
+      ? String(publication?.metadata?.receiptStatus ?? publication?.status ?? "PENDING_PUBLISHER").toUpperCase()
+      : "DRY_RUN";
+    records.push({
+      targetPostId: action.target.postId,
+      targetUrl: action.target.postUrl,
+      commentPreviewUrl: typeof permalink === "string" ? permalink : "not-verified",
+      comment: action.content.comment,
+      sourceUrl: result.article.sourceUrl,
+      actionId: action.actionId,
+      experimentId: action.experiment.experimentId,
+      publicationStatus,
+      ...(tracking ? { trackingUrl: tracking.trackingUrl, trackingEnvironment: tracking.environment, trackingStatus: tracking.status } : {}),
+    });
+  }
+  await mkdir(dirname(outputPath), { recursive: true });
+  await writeFile(outputPath, buildSpecificMarxMarkdown({
+    articleUrl: result.article.sourceUrl,
+    runId: result.summary.runId,
+    targetCount: result.summary.discovered,
+    records,
+    includeAgentQuotes,
+    errorMessages: result.summary.errorMessages,
+    noActions: result.noActions.map((decision) => ({
+      actionId: decision.actionId,
+      reason: decision.reason,
+      targetUrl: decision.target?.postUrl,
+    })),
+  }), { encoding: "utf8", flag: "w" });
+  return records;
+}
+
+async function runConfiguredPublisher(options: Record<string, string | boolean>): Promise<string> {
+  const python = typeof options["publisher-python"] === "string"
+    ? options["publisher-python"]
+    : process.env.MOLTBOOK_PUBLISHER_PYTHON ?? "/opt/homebrew/bin/python3";
+  const script = typeof options["publisher-script"] === "string"
+    ? options["publisher-script"]
+    : process.env.MOLTBOOK_PUBLISHER_SCRIPT ?? "/Users/0x79de/.hermes/skills/automation/moltbook-deterministic-publisher/scripts/publish_moltbook_action.py";
+  const config = typeof options["publisher-config"] === "string"
+    ? options["publisher-config"]
+    : process.env.MOLTBOOK_PUBLISHER_CONFIG ?? "/Users/0x79de/.hermes/data/moltbook-publisher.json";
+  const result = await execFileAsync(python, [script, "--config", config], { encoding: "utf8", timeout: 240_000, maxBuffer: 2 * 1024 * 1024 });
+  return result.stdout.trim();
+}
+
 function configuredLogger(runId: string, settings: ResolvedRuntimeSettings): JsonLogger {
   return createConfiguredLogger(runId, {
     structured: settings.system.observability?.structured_logs ?? true,
@@ -267,14 +381,14 @@ function configuredLogger(runId: string, settings: ResolvedRuntimeSettings): Jso
 
 export async function runCli(argv: string[], dependencies: CliDependencies = {}): Promise<string> {
   if (argv[0] === "--help" || argv[0] === "-h") {
-    const help = "Usage: marx-growth <run|status|experiments|replay|daemon|doctor|handoff|outcomes|ops> [options]\n\nrun options: --fixture <path> | --live-read --limit <n> --actions <n> --lookback <hours> --dry-run [--real-model]\nstatus: status [run_id]\nexperiments: experiments\nreplay: replay <run_id> --fixture <path> --dry-run\ndaemon: daemon --once --supervised --interval <ms> | --cron \"<expression>\"\ndoctor: doctor [--live-read] [--publisher] [--autonomous]\nhandoff: promote <run_id> <action_id>... | prepare <action_id> --grant <file> --publisher-account <name> | import-receipt <request_id> --receipt <file>\noutcomes: outcomes import --events <file>\nops: kill-status | kill-engage --reason <text> --actor <name> | kill-clearance-create --output <file> [--minutes <n>] | kill-clear --clearance <file>";
+    const help = "Usage: marx-growth <run|article-run|marx-specific-cycle|status|experiments|replay|daemon|doctor|handoff|outcomes|ops> [options]\n\nrun options: --fixture <path> | --live-read --limit <n> --actions <n> --lookback <hours> --dry-run [--real-model]\narticle-run: article-run --article-url <https://marx.finance/feed/...> --dry-run --limit <n> --actions <n> [--real-model] [--no-agent-quotes] [--post-ids <id1,id2,...>]\nmarx-specific-cycle: marx-specific-cycle --article-url <https://marx.finance/feed/...> [--post-ids <id1,id2,...>] [--limit <n> --actions <n>] [--with-agent-quotes|--no-agent-quotes] [--publish] [--output <path>]\nstatus: status [run_id]\nexperiments: experiments\nreplay: replay <run_id> --fixture <path> --dry-run\ndaemon: daemon --once --supervised --interval <ms> | --cron \"<expression>\"\ndoctor: doctor [--live-read] [--publisher] [--autonomous] [--model-smoke]\nhandoff: promote <run_id> <action_id>... | prepare <action_id> --grant <file> --publisher-account <name> | import-receipt <request_id> --receipt <file>\noutcomes: outcomes import --events <file>\nops: kill-status | kill-engage --reason <text> --actor <name> | kill-clearance-create --output <file> [--minutes <n>] | kill-clear --clearance <file>";
     (dependencies.stdout ?? ((line: string) => console.log(line)))(help);
     return help;
   }
   const parsed = parseArgs(argv);
   const output = dependencies.stdout ?? ((line: string) => console.log(line));
   if (parsed.options.help) {
-    const help = "Usage: marx-growth <run|status|experiments|replay|daemon|doctor|handoff|outcomes|ops> [options]\n\nrun options: --fixture <path> | --live-read --limit <n> --actions <n> --lookback <hours> --dry-run [--real-model]";
+    const help = "Usage: marx-growth <run|article-run|marx-specific-cycle|status|experiments|replay|daemon|doctor|handoff|outcomes|ops> [options]\n\nrun options: --fixture <path> | --live-read --limit <n> --actions <n> --lookback <hours> --dry-run [--real-model]\nmarx-specific-cycle: marx-specific-cycle --article-url <https://marx.finance/feed/...> [--post-ids <id1,id2,...>] [--limit <n> --actions <n>] [--with-agent-quotes|--no-agent-quotes] [--publish] [--output <path>]\ndoctor: doctor [--live-read] [--publisher] [--autonomous] [--model-smoke]";
     output(help);
     return help;
   }
@@ -283,7 +397,8 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   const requestedDryRun = booleanOption(parsed.options["dry-run"]);
   const defaultDryRun = requestedDryRun ?? config.execution?.dry_run_by_default ?? true;
   const selectedSourceMode = sourceMode(parsed.options, dependencies, settings);
-  const actionMode = (parsed.command === "run" || parsed.command === "daemon") && !defaultDryRun && settings.publishingEnabled && selectedSourceMode === "authorized_autonomous" ? "production" as const : "dry-run" as const;
+  const specificPublish = parsed.command === "marx-specific-cycle" && booleanOption(parsed.options.publish) === true;
+  const actionMode = (((parsed.command === "run" || parsed.command === "daemon") && !defaultDryRun) || specificPublish) && settings.publishingEnabled && selectedSourceMode === "authorized_autonomous" ? "production" as const : "dry-run" as const;
   const persistence = dependencies.persistence ?? (await openRuntimePersistence(process.env.MARX_GROWTH_DB ?? config.storage?.database_path, {
     actionValidation: { mode: actionMode, allowedDomains: settings.allowedDomains },
   })).persistence;
@@ -357,7 +472,36 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
           return { name: "publisher-contract-secret", status: "FAIL", message: error instanceof Error ? error.message : "Publisher contract secret is unavailable", checkedAt: checkedAt.toISOString() };
         }
       });
+      runners.push(async () => {
+        try {
+          await buildTrackerClient(settings, "production");
+          return { name: "production-tracker-token", status: "PASS", message: "Production tracker token is available", checkedAt: checkedAt.toISOString() };
+        } catch (error) {
+          return { name: "production-tracker-token", status: "FAIL", message: error instanceof Error ? error.message : "Production tracker token is unavailable", checkedAt: checkedAt.toISOString() };
+        }
+      });
       runners.push(async () => commandHealthCheck("codex", "codex", ["--version"], checkedAt));
+    }
+    if (booleanOption(parsed.options["model-smoke"]) === true) {
+      runners.push(async () => {
+        try {
+          const smoke = await (dependencies.modelSmoke?.() ?? runCodexModelSmoke({ model: config.model?.model_name ?? "gpt-5.6-luna" }));
+          return {
+            name: "codex-real-model-smoke",
+            status: "PASS",
+            message: `Codex real-model smoke succeeded in ${smoke.elapsedMs}ms`,
+            checkedAt: checkedAt.toISOString(),
+            metadata: { model: smoke.model, attempts: smoke.attempts, elapsedMs: smoke.elapsedMs },
+          };
+        } catch (error) {
+          return {
+            name: "codex-real-model-smoke",
+            status: "FAIL",
+            message: error instanceof Error ? error.message : "Codex real-model smoke failed",
+            checkedAt: checkedAt.toISOString(),
+          };
+        }
+      });
     }
     const report = await runHealthChecks(runners, checkedAt);
     const text = JSON.stringify(report, null, 2);
@@ -522,6 +666,182 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     if (!status) throw new Error(`No run found for run_id=${runId}`);
     const text = JSON.stringify(status, null, 2);
     output(text);
+    return text;
+  }
+
+  if (parsed.command === "marx-specific-cycle") {
+    const articleUrl = typeof parsed.options["article-url"] === "string" ? parsed.options["article-url"] : undefined;
+    const postIds = typeof parsed.options["post-ids"] === "string"
+      ? [...new Set(parsed.options["post-ids"].split(",").map((value) => value.trim()).filter(Boolean))]
+      : [];
+    if (!articleUrl) throw new Error("marx-specific-cycle requires --article-url <https://marx.finance/feed/...>");
+    const discoveryLimit = numeric(parsed.options.limit, postIds.length > 0 ? postIds.length : 5, "limit", 1);
+    const requestedActions = numeric(parsed.options.actions, postIds.length > 0 ? postIds.length : Math.min(discoveryLimit, settings.targetActions), "actions", 1);
+    const explicitTargets = postIds.length > 0;
+    const includeAgentQuotes = booleanOption(parsed.options["with-agent-quotes"]) === true && booleanOption(parsed.options["no-agent-quotes"]) !== true;
+    const specificEvaluationMode = evaluationModeOption(parsed.options) ?? "deterministic_mock";
+    const publish = booleanOption(parsed.options.publish) === true;
+    const trackingEnvironment = publish ? "production" as const : "development" as const;
+    if (publish) {
+      assertAutonomousConfiguration(settings, selectedSourceMode);
+      await killSwitchFor(config).assertAutonomousAllowed();
+    }
+    const runId = createRunId("specific");
+    const logger = configuredLogger(runId, settings);
+    let trackerClient = dependencies.trackerClient;
+    if (publish && !trackerClient) trackerClient = await buildTrackerClient(settings, "production");
+    const getTrackerClient = async (): Promise<MarxTrackerClient> => {
+      trackerClient ??= await buildTrackerClient(settings, trackingEnvironment);
+      return trackerClient;
+    };
+    const prepareTrackedCandidate = async (input: TrackingPreparationInput) => {
+      const client = await getTrackerClient();
+      return createTrackedCandidatePreparer({
+        client,
+        environment: trackingEnvironment,
+        feedId: articleUrl.split("/feed/")[1] ?? articleUrl,
+        destinationUrl: articleUrl,
+        persistence,
+      })(input);
+    };
+    const result = await runArticleWorkflow({
+      articleUrl,
+      ...(explicitTargets ? { targetPostIds: postIds } : {}),
+      includeAgentQuotes,
+      includeSourceLink: false,
+      maxPosts: explicitTargets ? postIds.length : discoveryLimit,
+      searchLimitPerQuery: numeric(parsed.options["search-limit"], 15, "search-limit", 1),
+      sourceTimeoutMs: config.source?.request_timeout_ms ?? 15_000,
+      persistence,
+      orchestratorOptions: {
+        runId,
+        dryRun: true,
+        evaluationMode: specificEvaluationMode,
+        modelGenerateComments: specificEvaluationMode === "real_model",
+        enableWorkerAdvisory: false,
+        targetActions: explicitTargets ? postIds.length : requestedActions,
+        fillTargetActions: !explicitTargets,
+        discoveryLimit: explicitTargets ? postIds.length : discoveryLimit,
+        candidateCount: settings.maxGeneratedCandidatesPerOpportunity,
+        ...(specificEvaluationMode === "real_model"
+          ? specificRealModelRuntimeOptions()
+          : {
+            workerConcurrency: Math.min(settings.modelConcurrency, 2),
+            workerMaxAttempts: settings.retryLimit,
+            modelTimeoutMs: config.model?.request_timeout_ms,
+            modelMaxAttempts: settings.retryLimit,
+            modelConcurrency: Math.min(settings.modelConcurrency, 2),
+          }),
+        workerRetryBackoffMs: settings.retryBackoffMs,
+        modelRetryBackoffMs: settings.retryBackoffMs,
+        model: config.model?.model_name ?? undefined,
+        promptRoot: config.model?.prompt_root,
+        lookbackHours: settings.lookbackHours,
+        explorationRate: settings.explorationRate,
+        minimumObservationsBeforeExploitation: settings.minimumObservationsBeforeExploitation,
+        scoringThreshold: settings.thresholds.minimumOpportunityScore,
+        evaluationPolicy: config.thresholds,
+        allowedDomains: settings.allowedDomains,
+        includeAgentQuotes,
+        includeSourceLink: false,
+        preparePublishableCandidate: prepareTrackedCandidate,
+        previousComments: [],
+        logger,
+      },
+    });
+    const outputOption = typeof parsed.options.output === "string" ? parsed.options.output : undefined;
+    const outputPath = outputOption?.endsWith("/")
+      ? join(outputOption, `${result.article.articleId}-${result.summary.runId}.md`)
+      : outputOption ?? `docs/moltbook-runs/${result.article.articleId}-${result.summary.runId}.md`;
+    const selectedTargetIds = explicitTargets ? postIds : result.relatedPosts.map((item) => item.post.postId);
+    const requiredPublishActions = explicitTargets ? postIds.length : requestedActions;
+    const preliminaryRecords = await writeSpecificCycleOutput(outputPath, result, persistence, publish, includeAgentQuotes);
+    if (publish) {
+      if (result.summary.errors > 0) {
+        throw new CliExecutionError(`marx-specific-cycle encountered ${result.summary.errors} error(s); no publication was attempted`, result.summary.runId);
+      }
+      if (result.actions.length === 0) {
+        throw new CliExecutionError("marx-specific-cycle found no qualified targets; no publication was attempted");
+      }
+      if (result.actions.length !== requiredPublishActions) {
+        throw new CliExecutionError(`marx-specific-cycle refused non-complete publish: ${result.actions.length}/${requiredPublishActions} required actions passed QA; increase --limit or choose a different target set`);
+      }
+      const productionOutbox = gatedProductionOutbox(config, settings, killSwitchFor(config));
+      for (const action of result.actions) await productionOutbox.enqueue(action);
+      await runConfiguredPublisher(parsed.options);
+    }
+    const records = publish
+      ? await writeSpecificCycleOutput(outputPath, result, persistence, publish, includeAgentQuotes)
+      : preliminaryRecords;
+    const text = JSON.stringify({
+      runId: result.summary.runId,
+      summary: result.summary,
+      article: result.article,
+      targetPostIds: selectedTargetIds,
+      actionIds: result.actions.map((action) => action.actionId),
+      noActions: result.noActions,
+      outputPath,
+      records,
+    }, null, 2);
+    output(text);
+    if (result.summary.errors > 0) {
+      throw new CliExecutionError(`Run ${result.summary.runId} completed with ${result.summary.errors} error(s); inspect ${outputPath}`, result.summary.runId);
+    }
+    if (publish && records.some((record) => record.publicationStatus !== "PUBLISHED")) {
+      throw new CliExecutionError("marx-specific-cycle did not verify every publication; inspect the output MD and receipts");
+    }
+    return text;
+  }
+
+  if (parsed.command === "article-run") {
+    const articleUrl = typeof parsed.options["article-url"] === "string" ? parsed.options["article-url"] : undefined;
+    if (!articleUrl) throw new Error("article-run requires --article-url <https://marx.finance/feed/...>");
+    if (requestedDryRun === false) throw new Error("article-run currently prepares a read-only dry-run; publish only through the validated downstream handoff");
+    const runId = createRunId();
+    const logger = configuredLogger(runId, settings);
+    const result = await runArticleWorkflow({
+      articleUrl,
+      maxPosts: numeric(parsed.options.limit, settings.candidateLimit, "limit", 1),
+      searchLimitPerQuery: numeric(parsed.options["search-limit"], 10, "search-limit", 1),
+      sourceTimeoutMs: config.source?.request_timeout_ms ?? 15_000,
+      includeAgentQuotes: booleanOption(parsed.options["no-agent-quotes"]) !== true,
+      targetPostIds: typeof parsed.options["post-ids"] === "string" ? parsed.options["post-ids"].split(",").map((value) => value.trim()).filter(Boolean) : undefined,
+      persistence,
+      orchestratorOptions: {
+        runId,
+        dryRun: true,
+        evaluationMode: evaluationModeOption(parsed.options),
+        targetActions: numeric(parsed.options.actions, settings.targetActions, "actions", 0),
+        discoveryLimit: numeric(parsed.options.limit, settings.candidateLimit, "limit", 1),
+        candidateCount: settings.maxGeneratedCandidatesPerOpportunity,
+        workerConcurrency: settings.modelConcurrency,
+        workerMaxAttempts: settings.retryLimit,
+        workerRetryBackoffMs: settings.retryBackoffMs,
+        modelTimeoutMs: config.model?.request_timeout_ms,
+        modelMaxAttempts: settings.retryLimit,
+        modelConcurrency: settings.modelConcurrency,
+        modelRetryBackoffMs: settings.retryBackoffMs,
+        model: config.model?.model_name ?? undefined,
+        promptRoot: config.model?.prompt_root,
+        lookbackHours: numeric(parsed.options.lookback, settings.lookbackHours, "lookback", 1),
+        explorationRate: settings.explorationRate,
+        minimumObservationsBeforeExploitation: settings.minimumObservationsBeforeExploitation,
+        scoringThreshold: settings.thresholds.minimumOpportunityScore,
+        evaluationPolicy: config.thresholds,
+        allowedDomains: settings.allowedDomains,
+        logger,
+      },
+    });
+    await persistDryRunRecord(result, logger, settings);
+    const text = JSON.stringify({
+      article: { articleId: result.article.articleId, title: result.article.title, sourceUrl: result.article.sourceUrl, evidenceStatus: result.article.evidenceStatus, visibleReplyCount: result.article.visibleReplyCount, replyCount: result.article.replyCount },
+      queries: result.queries,
+      relatedPosts: result.relatedPosts.map((item) => ({ postId: item.post.postId, url: item.post.url, submolt: item.post.submolt, score: item.score, matchedTerms: item.matchedTerms })),
+      run: formatRun(result),
+      actionIds: result.actions.map((action) => action.actionId),
+    }, null, 2);
+    output(text);
+    assertRunHealthy(result);
     return text;
   }
 

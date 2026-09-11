@@ -10,4 +10,6 @@ export * from "./publication";
 export * from "./outcome";
 export * from "./outcome-event";
 export * from "./strategy-statistics";
+export * from "./article";
 export * from "./agent";
+export * from "./tracking";

@@ -205,7 +205,44 @@ export const MIGRATIONS: readonly Migration[] = [
     sql: `
       ALTER TABLE outcome_events ADD COLUMN evidence_key TEXT;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_events_evidence_key
-        ON outcome_events(evidence_key) WHERE evidence_key IS NOT NULL;
+      ON outcome_events(evidence_key) WHERE evidence_key IS NOT NULL;
+    `,
+  },
+  {
+    version: 4,
+    name: "tracker_distribution_attribution",
+    sql: `
+      CREATE TABLE IF NOT EXISTS tracking_distributions (
+        ref TEXT PRIMARY KEY,
+        tracking_url TEXT NOT NULL,
+        environment TEXT NOT NULL,
+        status TEXT NOT NULL,
+        destination_url TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        feed_id TEXT NOT NULL,
+        source_post_id TEXT NOT NULL,
+        source_url TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        opportunity_id TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        pre_link_identity TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        action_id TEXT,
+        experiment_id TEXT,
+        comment_hash TEXT,
+        total_redirects INTEGER,
+        clicked INTEGER,
+        first_clicked_at TEXT,
+        last_clicked_at TEXT,
+        created_at TEXT NOT NULL,
+        finalized_at TEXT,
+        error_message TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_tracking_distributions_action
+        ON tracking_distributions(action_id) WHERE action_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_tracking_distributions_run_source
+        ON tracking_distributions(run_id, source_post_id);
     `,
   },
 ];
@@ -318,6 +355,37 @@ function ensureCurrentSchema(db: SqliteDatabase): void {
     CREATE INDEX IF NOT EXISTS idx_outcome_events_experiment ON outcome_events(experiment_id, observed_at);
     CREATE INDEX IF NOT EXISTS idx_outcome_events_action ON outcome_events(action_id, observed_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_events_evidence_key ON outcome_events(evidence_key) WHERE evidence_key IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS tracking_distributions (
+      ref TEXT PRIMARY KEY,
+      tracking_url TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      status TEXT NOT NULL,
+      destination_url TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      feed_id TEXT NOT NULL,
+      source_post_id TEXT NOT NULL,
+      source_url TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      opportunity_id TEXT NOT NULL,
+      candidate_id TEXT NOT NULL,
+      pre_link_identity TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      action_id TEXT,
+      experiment_id TEXT,
+      comment_hash TEXT,
+      total_redirects INTEGER,
+      clicked INTEGER,
+      first_clicked_at TEXT,
+      last_clicked_at TEXT,
+      created_at TEXT NOT NULL,
+      finalized_at TEXT,
+      error_message TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tracking_distributions_action
+      ON tracking_distributions(action_id) WHERE action_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_tracking_distributions_run_source
+      ON tracking_distributions(run_id, source_post_id);
     CREATE INDEX IF NOT EXISTS idx_strategy_statistics_family ON strategy_statistics(strategy_family, updated_at);
     CREATE VIEW IF NOT EXISTS strategy_stats AS SELECT * FROM strategy_statistics;
     CREATE INDEX IF NOT EXISTS idx_runtime_attribution_experiment ON runtime_attribution(run_id, experiment_id);

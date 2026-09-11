@@ -70,6 +70,8 @@ function targetScore(post: MoltbookPost): number {
 function strategyHints(context: ConversationContext): StrategyFamily[] {
   const text = context.conversationText.toLowerCase();
   const hints: StrategyFamily[] = [];
+  const metadata = context.post.metadata as Record<string, unknown> | undefined;
+  if (metadata?.marxEvidence) hints.push("marx_discussion_bridge", "comparative_reasoning");
   if (/source|provenance|where did|citation|evidence/.test(text)) hints.push("provenance");
   if (/consensus|agree|same signal|echo|model/.test(text)) hints.push("consensus_failure", "comparative_reasoning");
   if (/coordinate|multi-agent|collaborat|orchestrat/.test(text)) hints.push("coordination");

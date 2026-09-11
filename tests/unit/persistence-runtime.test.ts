@@ -14,6 +14,7 @@ import type {
   Opportunity,
   RunSummary,
 } from "../../src/orchestrator/contracts";
+import type { TrackingDistribution } from "../../src/schemas";
 
 function fixture() {
   const post: MoltbookPost = {
@@ -191,6 +192,95 @@ describe("SqliteRuntimePersistence attribution", () => {
     });
     await ingestVerifiedOutcomeEvents(persistence, [usage]);
     expect(persistence.getExperiments()[0]?.outcome).toMatchObject({ marxUsageSignal: true });
+    persistence.saveTrackingDistribution({
+      ref: "abcdefghijklmnopqrstuv",
+      trackingUrl: "https://marx-tracker.marxx.workers.dev/r/abcdefghijklmnopqrstuv",
+      environment: "production",
+      status: "ACTIVE",
+      destinationUrl: "https://marx.finance/feed/feed-42",
+      platform: "moltbook",
+      contentType: "comment",
+      feedId: "feed-42",
+      sourcePostId: post.postId,
+      sourceUrl: post.url,
+      runId,
+      opportunityId: opportunity.opportunityId,
+      candidateId: candidate.candidateId,
+      preLinkIdentity: "marx-tracker-prelink:test",
+      idempotencyKey: "marx-tracker-distribution:test",
+      actionId: action.actionId,
+      experimentId: experiment.experimentId,
+      commentHash: "a".repeat(64),
+      totalRedirects: 0,
+      clicked: false,
+      firstClickedAt: null,
+      lastClickedAt: null,
+      createdAt: "2026-08-24T00:02:00.000Z",
+      finalizedAt: "2026-08-24T00:02:01.000Z",
+    });
+    expect(persistence.getTrackingDistributionByActionId(action.actionId)).toMatchObject({
+      ref: "abcdefghijklmnopqrstuv",
+      status: "ACTIVE",
+      experimentId: experiment.experimentId,
+    });
     db.close();
+  });
+
+  it("persists tracking identity and redirect metrics in the local attribution table", () => {
+    const db = new Database(":memory:");
+    applyMigrations(db as unknown as SqliteDatabase);
+    const persistence = new SqliteRuntimePersistence(db as unknown as SqliteDatabase);
+    const distribution: TrackingDistribution = {
+      ref: "abcdefghijklmnopqrstuv",
+      trackingUrl: "https://marx-tracker.marxx.workers.dev/r/abcdefghijklmnopqrstuv",
+      environment: "production",
+      status: "ACTIVE",
+      destinationUrl: "https://marx.finance/feed/feed-1",
+      platform: "moltbook",
+      contentType: "comment",
+      feedId: "feed-1",
+      sourcePostId: "post-1",
+      sourceUrl: "https://www.moltbook.com/post/post-1",
+      runId: "run-tracking-1",
+      opportunityId: "opp-1",
+      candidateId: "candidate-1",
+      preLinkIdentity: "prelink-1",
+      idempotencyKey: "idempotency-1",
+      actionId: "act-1",
+      experimentId: "exp-1",
+      commentHash: "a".repeat(64),
+      totalRedirects: 3,
+      clicked: true,
+      firstClickedAt: "2026-09-10T00:00:00.000Z",
+      lastClickedAt: "2026-09-10T00:03:00.000Z",
+      createdAt: "2026-09-10T00:00:00.000Z",
+      finalizedAt: "2026-09-10T00:00:01.000Z",
+    };
+
+    persistence.saveTrackingDistribution(distribution);
+
+    expect(db.prepare("SELECT ref, status, action_id, experiment_id, comment_hash, total_redirects, clicked FROM tracking_distributions").all()).toEqual([{
+      ref: distribution.ref,
+      status: "ACTIVE",
+      action_id: distribution.actionId,
+      experiment_id: distribution.experimentId,
+      comment_hash: distribution.commentHash,
+      total_redirects: 3,
+      clicked: 1,
+    }]);
+    expect(persistence.getTrackingDistributionByActionId("act-1")).toMatchObject(distribution);
+  });
+
+  it("persists the observed retry count in run metrics", () => {
+    const db = new Database(":memory:");
+    applyMigrations(db as unknown as SqliteDatabase);
+    const persistence = new SqliteRuntimePersistence(db as unknown as SqliteDatabase);
+    const value = summary("run-retry-metrics");
+    value.retries = 4;
+
+    persistence.saveRun(value);
+
+    const row = db.prepare("SELECT counts_json FROM runs WHERE run_id = ?").get<{ counts_json: string }>(value.runId);
+    expect(JSON.parse(row!.counts_json).retries).toBe(4);
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { CodexExecExecutor, CodexExecutionError } from "../../src/models";
+import { CodexExecExecutor, CodexExecutionError, runCodexExecStream, type CodexExecStreamRunner } from "../../src/models";
 
 describe("Codex Exec executor", () => {
   it("keeps external content fenced as data and validates structured output", async () => {
@@ -46,7 +46,12 @@ describe("Codex Exec executor", () => {
     });
     expect(receivedPrompt).toContain("\\u003c/untrusted-data>");
     expect(receivedPrompt).not.toContain("MOLTBOOK_API_KEY");
-    expect(receivedEnv).toEqual({ PATH: "/safe/bin", HOME: "/safe/home" });
+    expect(receivedEnv).toEqual({
+      PATH: "/safe/bin",
+      HOME: "/safe/home",
+      CODEX_HOME: "/safe/home/.codex",
+      TERM: "xterm-256color",
+    });
   });
 
   it("retries malformed structured output", async () => {
@@ -104,5 +109,101 @@ describe("Codex Exec executor", () => {
     const malformed = new CodexExecExecutor({ maxAttempts: 2, retryDelayMs: 0, runner: async () => ({ stdout: "not-json" }) });
     await expect(malformed.run({ taskId: "codex-terminal", kind: "test", input: {}, outputSchema: z.object({ answer: z.string() }) }))
       .rejects.toBeInstanceOf(CodexExecutionError);
+  });
+
+  it("uses a documented low reasoning effort and a real terminal profile for streamed runs", async () => {
+    let received: string[] = [];
+    let receivedEnv: NodeJS.ProcessEnv | undefined;
+    const streamRunner: CodexExecStreamRunner = async (args, options) => {
+      received = args;
+      receivedEnv = options.env;
+      return { stdout: JSON.stringify({ answer: "ok" }) };
+    };
+    const executor = new CodexExecExecutor({
+      maxAttempts: 1,
+      reasoningEffort: "low",
+      cwd: "/tmp",
+      env: { PATH: "/safe/bin", HOME: "/safe/home", TERM: "dumb", NO_COLOR: "1" },
+      streamRunner,
+    });
+
+    await executor.run({ taskId: "codex-stream-config", kind: "test", input: {}, outputSchema: z.object({ answer: z.string() }) });
+
+    expect(received).toContain("--ignore-rules");
+    expect(received).toContain("--cd");
+    expect(received).toContain("/tmp");
+    expect(received).toContain('--config');
+    expect(received).toContain('model_reasoning_effort="low"');
+    expect(receivedEnv).toMatchObject({ TERM: "xterm-256color", NO_COLOR: "1" });
+  });
+
+  it("surfaces a streamed Codex error before the process reaches the outer timeout", async () => {
+    let observedType = "";
+    const streamRunner: CodexExecStreamRunner = async (_args, _options, observer) => {
+      const failure = observer.onEvent?.({ type: "error", message: "authentication failed" });
+      observedType = failure?.name ?? "";
+      if (failure) throw failure;
+      return { stdout: JSON.stringify({ answer: "unreachable" }) };
+    };
+    const executor = new CodexExecExecutor({ maxAttempts: 1, timeoutMs: 5_000, streamRunner });
+
+    await expect(executor.run({ taskId: "codex-stream-error", kind: "test", input: {}, outputSchema: z.object({ answer: z.string() }) }))
+      .rejects.toMatchObject({ kind: "execution", message: expect.stringContaining("authentication failed") });
+    expect(observedType).toBe("CodexExecutionError");
+  });
+
+  it("classifies turn.failed as an execution failure with the last event metadata", async () => {
+    const streamRunner: CodexExecStreamRunner = async (_args, _options, observer) => {
+      const failure = observer.onEvent?.({ type: "turn.failed", error: { message: "provider unavailable" } });
+      if (failure) throw failure;
+      return { stdout: JSON.stringify({ answer: "unreachable" }) };
+    };
+    const executor = new CodexExecExecutor({ maxAttempts: 1, streamRunner });
+
+    await expect(executor.run({ taskId: "codex-turn-failed", kind: "test", input: {}, outputSchema: z.object({ answer: z.string() }) }))
+      .rejects.toMatchObject({ kind: "execution", message: expect.stringContaining("provider unavailable") });
+  });
+
+  it("streams JSONL events and returns process lifecycle metadata", async () => {
+    const events: string[] = [];
+    const result = await runCodexExecStream("/bin/sh", ["-c", "printf '%s\\n' '{\"type\":\"thread.started\"}' '{\"type\":\"turn.completed\"}'"], {
+      taskId: "stream-lifecycle",
+      timeout: 1_000,
+      maxBufferBytes: 8 * 1024,
+      env: { PATH: "/usr/bin:/bin" },
+    }, {
+      onEvent: (event) => { events.push(String(event.type)); return undefined; },
+    });
+
+    expect(events).toEqual(["thread.started", "turn.completed"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.firstEventAt).toBeDefined();
+    expect(result.lastEventType).toBe("turn.completed");
+  });
+
+  it("stops a hung child process at the bounded timeout", async () => {
+    const startedAt = Date.now();
+    await expect(runCodexExecStream("/bin/sh", ["-c", "sleep 5"], {
+      taskId: "stream-timeout",
+      timeout: 50,
+      maxBufferBytes: 8 * 1024,
+      env: { PATH: "/usr/bin:/bin" },
+    }, {})).rejects.toMatchObject({ kind: "timeout", taskId: "stream-timeout" });
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it("terminates a child as soon as a streamed error event arrives", async () => {
+    const startedAt = Date.now();
+    await expect(runCodexExecStream("/bin/sh", ["-c", "printf '%s\\n' '{\"type\":\"error\",\"message\":\"provider unavailable\"}'; sleep 5"], {
+      taskId: "stream-early-error",
+      timeout: 5_000,
+      maxBufferBytes: 8 * 1024,
+      env: { PATH: "/usr/bin:/bin" },
+    }, {
+      onEvent: (event) => event.type === "error"
+        ? new CodexExecutionError("execution", "stream-early-error", "provider unavailable")
+        : undefined,
+    })).rejects.toMatchObject({ kind: "execution", taskId: "stream-early-error", metadata: { lastEventType: "error" } });
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
   });
 });

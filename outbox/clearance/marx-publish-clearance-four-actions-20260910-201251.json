@@ -1,0 +1,9 @@
+{
+  "authorizationId": "clearance_20260910171251924_27f5f074",
+  "actor": "operator",
+  "issuedAt": "2026-09-10T17:12:51.899Z",
+  "expiresAt": "2026-09-10T17:32:51.899Z",
+  "reason": "complete remaining four actions for Marx feed 7c521966",
+  "signatureKeyId": "contract-v1",
+  "signature": "c524cff1d255ed1d1c88bcf6041a1a227f5ce5a8fe31840fa52a8fd5ebcd7867"
+}

@@ -45,4 +45,76 @@ describe("messaging and security evals", () => {
     expect(qa.reasons).toContain("DECEPTIVE_IDENTITY_CLAIM");
     expect(qa.passed).toBe(false);
   });
+
+  it("accepts a grounded Marx agent quote with a verified Marx source link", () => {
+    const context = buildConversationContext({
+      post: {
+        postId: "article-target",
+        url: "https://www.moltbook.com/post/article-target",
+        submolt: "finance",
+        author: { id: "agent-target", name: "target-agent", type: "agent" },
+        content: "Fed rate hikes could pressure growth stocks while inflation remains above target.",
+        createdAt: "2026-09-05T00:00:00.000Z",
+        fetchedAt: "2026-09-05T00:00:00.000Z",
+        metadata: {
+          articleContext: { articleId: "article-1", title: "Fed decision", sourceUrl: "https://marx.finance/feed/article-1" },
+          marxEvidence: {
+            articleId: "article-1",
+            articleUrl: "https://marx.finance/feed/article-1",
+            replyId: "reply-1",
+            agentId: "agent-marx-1",
+            agentName: "AutoTrader",
+            quote: "The nuanced approach from Chairman Warsh highlights the Fed's balancing act between inflation control and maintaining economic stability.",
+            quoteUrl: "https://marx.finance/feed/article-1",
+            evidenceStatus: "partial",
+          },
+        },
+      },
+      replies: [],
+      fetchedAt: "2026-09-05T00:00:00.000Z",
+    });
+    const qa = runDeterministicQA({
+      candidateId: "cand-quote",
+      opportunityId: "opp-quote",
+      strategyFamily: "marx_discussion_bridge",
+      hookFamily: "specific_claim",
+      comment: "Fed rate hikes could pressure growth stocks while inflation remains above target; Marx can help compare how agents test that trade-off. A related agent note from AutoTrader says: \"The nuanced approach from Chairman Warsh highlights the Fed's balancing act between inflation control and maintaining economic stability.\" ([source thread](https://marx.finance/feed/article-1)).",
+      promptVersion: "generator-v1",
+      modelVersion: "test",
+    }, context);
+    expect(qa.passed).toBe(true);
+    expect(qa.checks.marx_quote_grounded).toBe(true);
+  });
+
+  it("does not require agent evidence when quote mode is explicitly disabled", () => {
+    const trackingUrl = "https://marx-tracker.marxx.workers.dev/r/test-ref";
+    const context = buildConversationContext({
+      post: {
+        postId: "article-no-quote-target",
+        url: "https://www.moltbook.com/post/article-no-quote-target",
+        submolt: "finance",
+        author: { id: "agent-target", name: "target-agent", type: "agent" },
+        content: "Fed rate hikes could pressure growth stocks while inflation remains above target.",
+        createdAt: "2026-09-05T00:00:00.000Z",
+        fetchedAt: "2026-09-05T00:00:00.000Z",
+        metadata: {
+          articleContext: { articleId: "article-1", title: "Fed decision", sourceUrl: "https://marx.finance/feed/article-1", quoteMode: "disabled" },
+        },
+      },
+      replies: [],
+      fetchedAt: "2026-09-05T00:00:00.000Z",
+    });
+    const qa = runDeterministicQA({
+      candidateId: "cand-no-quote",
+      opportunityId: "opp-no-quote",
+      strategyFamily: "provenance",
+      hookFamily: "specific_claim",
+      comment: `Marx can help agents compare this rate signal with independent evidence before acting. [Open Marx feed](${trackingUrl})`,
+      promptVersion: "generator-v1",
+      modelVersion: "test",
+    }, context, [], { trackingUrl });
+
+    expect(qa.checks.marx_evidence_present).toBe(true);
+    expect(qa.reasons).not.toContain("MARX_EVIDENCE_MISSING");
+  });
 });

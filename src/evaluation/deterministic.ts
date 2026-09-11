@@ -2,6 +2,7 @@ import { contextHasSpecificAnchor } from "../context";
 import { analyzeUntrustedText } from "../security";
 import { countMarxMentions } from "../generation";
 import type { ConversationContext, GeneratedCandidate, QAResult } from "../orchestrator/contracts";
+import { ArticleEvidenceRefSchema } from "../schemas";
 
 const GENERIC_MARKETING = [
   /^great\s+post/i,
@@ -69,6 +70,45 @@ function marxPhrase(value: string): string {
   return index < 0 ? "" : words.slice(Math.max(0, index - 4), index + 5).join(" ");
 }
 
+function articleEvidence(context: ConversationContext): ReturnType<typeof ArticleEvidenceRefSchema.parse> | undefined {
+  const value = context.post.metadata && typeof context.post.metadata === "object"
+    ? (context.post.metadata as Record<string, unknown>).marxEvidence
+    : undefined;
+  const parsed = ArticleEvidenceRefSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function safeEvidenceLinkTest(comment: string, context: ConversationContext, trackingUrl?: string): boolean {
+  const urls = comment.match(/https?:\/\/[^\s)]+/gi) ?? [];
+  if (urls.length === 0) return true;
+  const evidence = articleEvidence(context);
+  if (!evidence) return trackingUrl !== undefined && urls.every((value) => {
+    try { return new URL(value.replace(/[.,]+$/u, "")).href === trackingUrl; } catch { return false; }
+  });
+  return urls.every((value) => {
+    try {
+      const url = new URL(value.replace(/[.,]+$/u, ""));
+      return url.href === evidence.quoteUrl || (trackingUrl !== undefined && url.href === trackingUrl);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function quoteGroundedTest(comment: string, context: ConversationContext): boolean {
+  const articleContext = context.post.metadata && typeof context.post.metadata === "object"
+    ? (context.post.metadata as Record<string, unknown>).articleContext
+    : undefined;
+  if (articleContext && typeof articleContext === "object" && (articleContext as Record<string, unknown>).quoteMode === "disabled") return true;
+  const evidence = articleEvidence(context);
+  if (!evidence) return true;
+  const normalizedComment = comment.toLowerCase().replace(/[^a-z0-9\s]/g, " ");
+  const normalizedQuote = evidence.quote.toLowerCase().replace(/[^a-z0-9\s]/g, " ");
+  const quoteWords = normalizedQuote.split(/\s+/u).filter((word) => word.length > 4);
+  const overlap = quoteWords.filter((word) => normalizedComment.includes(word)).length;
+  return comment.includes(evidence.agentName) && overlap >= Math.min(4, Math.max(2, quoteWords.length));
+}
+
 export function unsupportedClaimTest(comment: string): boolean {
   return UNSUPPORTED_CLAIM.some((pattern) => pattern.test(comment));
 }
@@ -83,21 +123,39 @@ export function runDeterministicQA(
   candidate: GeneratedCandidate,
   context: ConversationContext,
   previousComments: string[] = [],
+  options: { trackingUrl?: string } = {},
 ): QAResult {
   const comment = candidate.comment.trim();
-  const marxMentionCount = countMarxMentions(comment);
+  const semanticComment = options.trackingUrl === undefined
+    ? comment
+    : comment
+      .replace(`[Open Marx feed](${options.trackingUrl})`, "")
+      .replace(`[Open Marx feed (tracked)](${options.trackingUrl})`, "")
+      .replace(/\s{2,}/gu, " ")
+      .trim();
+  const marxMentionCount = countMarxMentions(semanticComment);
   const injection = analyzeUntrustedText(context.conversationText);
-  const contextualAnchor = contextHasSpecificAnchor(context, comment);
-  const standaloneMarketing = standaloneMarketingTest(comment, context);
-  const duplicate = duplicateCommentTest(comment, previousComments);
-  const repeatedHook = repeatedHookTest(comment, previousComments);
-  const repeatedMarxPhrasing = repeatedMarxPhrasingTest(comment, previousComments);
-  const usefulNewIdea = usefulNewIdeaTest(comment);
-  const hype = analyzeUntrustedText(comment).isHype;
-  const unsupportedClaim = unsupportedClaimTest(comment);
+  const contextualAnchor = contextHasSpecificAnchor(context, semanticComment);
+  const standaloneMarketing = standaloneMarketingTest(semanticComment, context);
+  const duplicate = duplicateCommentTest(semanticComment, previousComments);
+  const repeatedHook = repeatedHookTest(semanticComment, previousComments);
+  const repeatedMarxPhrasing = repeatedMarxPhrasingTest(semanticComment, previousComments);
+  const usefulNewIdea = usefulNewIdeaTest(semanticComment);
+  const hype = analyzeUntrustedText(semanticComment).isHype;
+  const unsupportedClaim = unsupportedClaimTest(semanticComment);
   const promptInjection = injection.containsPromptInjection;
+  const commentInjection = analyzeUntrustedText(semanticComment).containsPromptInjection;
   const growthContextPresent = GROWTH_CONTEXT.test(context.conversationText);
-  const deceptiveIdentity = DECEPTIVE_IDENTITY.test(comment);
+  const deceptiveIdentity = DECEPTIVE_IDENTITY.test(semanticComment);
+  const evidence = articleEvidence(context);
+  const articleContext = context.post.metadata && typeof context.post.metadata === "object"
+    ? (context.post.metadata as Record<string, unknown>).articleContext
+    : undefined;
+  const quoteModeDisabled = Boolean(articleContext && typeof articleContext === "object"
+    && (articleContext as Record<string, unknown>).quoteMode === "disabled");
+  const evidencePresent = !articleContext || quoteModeDisabled || Boolean(evidence);
+  const quoteGrounded = quoteGroundedTest(semanticComment, context);
+  const safeEvidenceLink = safeEvidenceLinkTest(comment, context, options.trackingUrl);
   const checks: Record<string, boolean> = {
     source_post_present: Boolean(context.post.content),
     context_present: Boolean(context.conversationText),
@@ -117,11 +175,13 @@ export function runDeterministicQA(
     "unsupported-claim": !unsupportedClaim,
     marx_count_valid: marxMentionCount >= 1 && marxMentionCount <= 2,
     "Marx-count": marxMentionCount >= 1 && marxMentionCount <= 2,
-    prompt_injection_ignored: !promptInjection,
-    "prompt-injection": !promptInjection,
-    feature_dump_rejected: !FEATURE_DUMP.test(comment),
+    prompt_injection_ignored: !promptInjection && !commentInjection,
+    "prompt-injection": !promptInjection && !commentInjection,
+    feature_dump_rejected: !FEATURE_DUMP.test(semanticComment),
     deceptive_identity_rejected: !deceptiveIdentity,
-    hidden_redirect: !/(?:https?:\/\/|www\.)/i.test(comment),
+    hidden_redirect: safeEvidenceLink,
+    marx_evidence_present: evidencePresent,
+    marx_quote_grounded: quoteGrounded,
     non_empty: comment.length >= 40,
   };
   const reasons: string[] = [];
@@ -139,6 +199,8 @@ export function runDeterministicQA(
   if (!checks.feature_dump_rejected) reasons.push("FEATURE_DUMP");
   if (!checks.deceptive_identity_rejected) reasons.push("DECEPTIVE_IDENTITY_CLAIM");
   if (!checks.hidden_redirect) reasons.push("HIDDEN_REDIRECT");
+  if (!checks.marx_evidence_present) reasons.push("MARX_EVIDENCE_MISSING");
+  if (!checks.marx_quote_grounded) reasons.push("MARX_QUOTE_UNGROUNDED");
   if (!checks.non_empty) reasons.push("EMPTY_OR_TOO_SHORT");
   return { passed: reasons.length === 0, checks, reasons, marxMentionCount };
 }

@@ -15,7 +15,7 @@ import {
   adaptPost,
   adaptRun,
 } from "./adapters";
-import { ActionSchema, AgentSchema, ExperimentSchema, MarxOutcomeEventSchema, ModelRunRecordSchema, MoltbookPostSchema, OutcomeSchema, PublicationSchema, RunSummarySchema, StrategyStatisticsSchema, WorkerReportSchema, validateActionSecurity, type Action, type MarxOutcomeEvent, type ModelRunRecord, type Outcome, type PostContext, type Publication, type StrategyStatistics } from "../schemas";
+import { ActionSchema, AgentSchema, ExperimentSchema, MarxOutcomeEventSchema, ModelRunRecordSchema, MoltbookPostSchema, OutcomeSchema, PublicationSchema, RunSummarySchema, StrategyStatisticsSchema, TrackingDistributionSchema, WorkerReportSchema, validateActionSecurity, type Action, type MarxOutcomeEvent, type ModelRunRecord, type Outcome, type PostContext, type Publication, type StrategyStatistics, type TrackingDistribution } from "../schemas";
 import type { ActionSecurityOptions } from "../schemas";
 import type {
   ActionPayload,
@@ -356,6 +356,85 @@ export class SqliteRuntimePersistence implements PersistenceLike {
       publication_json=excluded.publication_json, acknowledged_at=excluded.acknowledged_at, error_message=excluded.error_message`).run(
       parsed.publicationId, parsed.actionId, parsed.experimentId ?? null, parsed.status, jsonText(parsed), parsed.attemptedAt ?? new Date().toISOString(), parsed.acknowledgedAt ?? null, parsed.errorMessage ?? null,
     );
+  }
+
+  public saveTrackingDistribution(distribution: TrackingDistribution): void {
+    const parsed = TrackingDistributionSchema.parse(distribution);
+    this.db.prepare(`INSERT INTO tracking_distributions
+      (ref, tracking_url, environment, status, destination_url, platform, content_type, feed_id,
+       source_post_id, source_url, run_id, opportunity_id, candidate_id, pre_link_identity,
+       idempotency_key, action_id, experiment_id, comment_hash, total_redirects, clicked,
+       first_clicked_at, last_clicked_at, created_at, finalized_at, error_message)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(ref) DO UPDATE SET tracking_url=excluded.tracking_url, environment=excluded.environment,
+        status=excluded.status, destination_url=excluded.destination_url, platform=excluded.platform,
+        content_type=excluded.content_type, feed_id=excluded.feed_id, source_post_id=excluded.source_post_id,
+        source_url=excluded.source_url, run_id=excluded.run_id, opportunity_id=excluded.opportunity_id,
+        candidate_id=excluded.candidate_id, pre_link_identity=excluded.pre_link_identity,
+        idempotency_key=excluded.idempotency_key, action_id=excluded.action_id,
+        experiment_id=excluded.experiment_id, comment_hash=excluded.comment_hash,
+        total_redirects=excluded.total_redirects, clicked=excluded.clicked,
+        first_clicked_at=excluded.first_clicked_at, last_clicked_at=excluded.last_clicked_at,
+        created_at=excluded.created_at, finalized_at=excluded.finalized_at,
+        error_message=excluded.error_message`).run(
+      parsed.ref,
+      parsed.trackingUrl,
+      parsed.environment,
+      parsed.status,
+      parsed.destinationUrl,
+      parsed.platform,
+      parsed.contentType,
+      parsed.feedId,
+      parsed.sourcePostId,
+      parsed.sourceUrl,
+      parsed.runId,
+      parsed.opportunityId,
+      parsed.candidateId,
+      parsed.preLinkIdentity,
+      parsed.idempotencyKey,
+      parsed.actionId ?? null,
+      parsed.experimentId ?? null,
+      parsed.commentHash ?? null,
+      parsed.totalRedirects ?? null,
+      parsed.clicked === undefined ? null : parsed.clicked ? 1 : 0,
+      parsed.firstClickedAt ?? null,
+      parsed.lastClickedAt ?? null,
+      parsed.createdAt,
+      parsed.finalizedAt ?? null,
+      parsed.errorMessage ?? null,
+    );
+  }
+
+  public getTrackingDistributionByActionId(actionId: string): TrackingDistribution | undefined {
+    const row = this.db.prepare("SELECT * FROM tracking_distributions WHERE action_id = ?").get<Record<string, unknown>>(actionId);
+    if (!row) return undefined;
+    return TrackingDistributionSchema.parse({
+      ref: row.ref,
+      trackingUrl: row.tracking_url,
+      environment: row.environment,
+      status: row.status,
+      destinationUrl: row.destination_url,
+      platform: row.platform,
+      contentType: row.content_type,
+      feedId: row.feed_id,
+      sourcePostId: row.source_post_id,
+      sourceUrl: row.source_url,
+      runId: row.run_id,
+      opportunityId: row.opportunity_id,
+      candidateId: row.candidate_id,
+      preLinkIdentity: row.pre_link_identity,
+      idempotencyKey: row.idempotency_key,
+      ...(typeof row.action_id === "string" ? { actionId: row.action_id } : {}),
+      ...(typeof row.experiment_id === "string" ? { experimentId: row.experiment_id } : {}),
+      ...(typeof row.comment_hash === "string" ? { commentHash: row.comment_hash } : {}),
+      ...(typeof row.total_redirects === "number" ? { totalRedirects: row.total_redirects } : {}),
+      ...(typeof row.clicked === "number" ? { clicked: row.clicked === 1 } : {}),
+      ...(typeof row.first_clicked_at === "string" ? { firstClickedAt: row.first_clicked_at } : row.first_clicked_at === null ? { firstClickedAt: null } : {}),
+      ...(typeof row.last_clicked_at === "string" ? { lastClickedAt: row.last_clicked_at } : row.last_clicked_at === null ? { lastClickedAt: null } : {}),
+      createdAt: row.created_at,
+      ...(typeof row.finalized_at === "string" ? { finalizedAt: row.finalized_at } : {}),
+      ...(typeof row.error_message === "string" ? { errorMessage: row.error_message } : {}),
+    });
   }
 
   public saveOutcome(outcome: Outcome): void {

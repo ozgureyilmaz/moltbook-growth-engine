@@ -62,6 +62,19 @@ publisher_bridge:
   contract_keychain_account: publisher-contract
   contract_key_id: contract-v1
 
+tracking:
+  request_timeout_ms: 10000
+  max_retries: 2
+  retry_backoff_ms: 250
+  production:
+    base_url: https://marx-tracker.marxx.workers.dev
+    secret_provider: environment
+    token_environment_variable: MARX_TRACKER_API_TOKEN
+  development:
+    base_url_environment_variable: MARX_TRACKER_DEVELOPMENT_BASE_URL
+    secret_provider: environment
+    token_environment_variable: MARX_TRACKER_DEVELOPMENT_API_TOKEN
+
 operations:
   runtime_directory: data/runtime
   supervisor_lock_path: data/runtime/supervisor.lock.json

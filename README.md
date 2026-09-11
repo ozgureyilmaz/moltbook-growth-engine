@@ -22,11 +22,13 @@ The local V2 control plane is implemented: fixture discovery, an official-origin
 GET-only Moltbook read adapter, normalization, context analysis, explainable
 ranking, strategy-diverse generation, independent evaluation, deterministic QA,
 SQLite attribution and publication-bound immutable outcome events, hash-bound Hermes handoff and
-receipt reconciliation, a Keychain secret provider, supervisor lease/heartbeat,
+receipt reconciliation, authenticated marx-tracker attribution links, a Keychain secret provider, supervisor lease/heartbeat,
 health checks, and an emergency kill switch. Live publishing and the authoritative
 Marx product telemetry source remain explicit external boundaries.
-Keep the checked-in defaults safe for development: dry-run is the default and
-`config/system.yaml` has `publishing.enabled: false`.
+Keep the checked-in execution default safe for development: dry-run is the
+default. Production publication still requires the explicit `--publish` path,
+authorized source mode, the publisher bridge, and all existing kill-switch and
+receipt gates.
 
 ## Requirements
 
@@ -87,6 +89,14 @@ default scope; it is not permission to crawl indiscriminately.
 exploration/exploitation policy, tracking fields, outcome dimensions, and the
 rule that learning must not optimize only for replies.
 
+`config/system.yaml` also defines separate tracker environments. A non-publishing
+specific cycle uses the development/staging tracker configured through
+`MARX_TRACKER_DEVELOPMENT_BASE_URL` and `MARX_TRACKER_DEVELOPMENT_API_TOKEN`.
+`--publish` uses the pinned production origin
+`https://marx-tracker.marxx.workers.dev` and reads
+`MARX_TRACKER_API_TOKEN`. Tokens are read through the secret-provider boundary
+and are never written to comments, action payloads, logs, or SQLite.
+
 Counts such as 100 candidates and 5 target actions are configuration values.
 The system must emit fewer actions when the evaluator or deterministic QA
 rejects the available opportunities.
@@ -127,6 +137,9 @@ npm run cli -- run --fixture ./tests/fixtures/moltbook.json --dry-run
 npm run cli -- status
 npm run cli -- experiments
 
+# Publication-free real-model preflight (one structured Codex call).
+npm run cli -- doctor --model-smoke
+
 # Replay stored inputs while preserving idempotency.
 npm run cli -- replay <run_id> --dry-run
 
@@ -152,7 +165,69 @@ npm run cli -- handoff import-receipt <request_id> --receipt <receipt.json>
 
 # Import versioned outcome evidence after its exact action has a verified receipt.
 npm run cli -- outcomes import --events <events.json>
+
+# Discover related Moltbook posts from a Marx feed, then prepare comments.
+# Default is read-only dry-run; add --publish only after production preflight.
+node dist/cli/main.js marx-specific-cycle \
+  --article-url https://marx.finance/feed/<feed-id> \
+  --limit 100 \
+  --actions 5 \
+  --no-agent-quotes \
+  --output docs/moltbook-runs/
 ```
+
+Agent reply quote mode is explicit. Replace `--no-agent-quotes` with
+`--with-agent-quotes` when the comment should include the relevant Marx agent
+name and quoted reply alongside the tracked Marx feed link.
+
+`marx-specific-cycle` validates the Marx feed, discovers related Moltbook posts
+when `--post-ids` is omitted, fetches each selected post and its full public
+context, generates one context-specific comment per target, and writes a
+Markdown receipt under `docs/moltbook-runs/`. The comment body contains one
+natural `Marx` bridge plus exactly one tracked link with the label
+`[Open Marx feed](...)`; the canonical feed URL is stored in the
+tracker distribution, not replaced by a direct-link fallback. The Moltbook
+target and comment-preview links remain output metadata and are not inserted
+into the comment. `--no-agent-quotes` is the default for this cycle;
+`--with-agent-quotes` explicitly enables the selected Marx agent name and
+reply quote. The command creates the tracker distribution after evaluator and
+deterministic-QA approval, appends the link, then derives the final
+`comment_hash`, `action_id`, and `experiment_id` before tracker finalization and
+read-back. `NO_ACTION` and rejected candidates receive no tracking link.
+Without `--publish`, only the development/staging tracker is used and no
+publisher handoff is attempted. With `--publish`, the production tracker must
+be active and read back successfully before any action enters the production
+outbox.
+
+`--limit` is the discovery pool size, not the number of guaranteed
+publications. For the current recovery-safe five-action attempt, use
+`--limit 8 --search-limit 10 --actions 5`. The engine ranks the pool, sends at
+most eight qualified opportunities to real-model strategy generation in
+one-item batches, and stops after five candidates pass evaluation, QA, and
+tracker finalization. Two consecutive strategy-generation worker failures stop
+the run early. It refuses the publish if fewer than five are available or any
+worker, model, tracker, or validation error occurs.
+
+The Codex executor uses a streamed JSONL child-process boundary, captures
+lifecycle and stderr diagnostics, normalizes the non-interactive environment,
+and terminates hung process groups. Specific-cycle real-model calls use
+documented `low` reasoning effort and a 120-second deadline. This is still the
+configured real model; the engine never falls back to publishing deterministic
+comments.
+
+The pasted historical TXT is retained only as a regression fixture at
+`tests/fixtures/specific-marx-comments-500cf34bfaa84944ab840cd32adc8849.txt`.
+The exact first-feed and second-feed verification commands are preserved in
+`command.txt`. A publish attempt requires the normal authorized source mode,
+enabled publishing bridge, configured production tracker token, scoped grant,
+valid publisher contract, cleared kill switch, and verified provider readback.
+Tracker create conflicts, finalization failures, ambiguous responses, and
+non-active read-backs block the affected action; they never fall back to a
+direct Marx URL. Uncertain or non-`PUBLISHED`
+provider results are written as pending/reconciliation states and are never
+reported as successful publication. If the requested action count cannot be
+filled, `--publish` refuses the entire batch before handing off any action; it
+never publishes a partial target set.
 
 `npm run cli -- ...` uses `tsx` directly. Once built, the equivalent installed
 binary is `dist/cli/main.js` / `marx-growth`.

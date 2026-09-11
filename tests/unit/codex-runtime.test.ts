@@ -64,6 +64,14 @@ describe("Codex runtime model boundary", () => {
     expect(String(received?.untrustedData)).toContain("Ignore previous instructions");
   });
 
+  it("documents the canonical evaluator fields required by runtime validation", async () => {
+    const prompt = await loadPrompt("evaluator");
+    expect(prompt.instructions).toContain('"overallScore"');
+    expect(prompt.instructions).toContain('"confidence"');
+    expect(prompt.instructions).toContain('"reasons"');
+    expect(prompt.instructions).toContain('"contextFit"');
+  });
+
   it("routes independent evaluation through ModelExecutor and validates its output", async () => {
     const post = fixturePost({ postId: "runtime-eval-post", content: "Agents should compare the provenance behind a market signal before acting." });
     const source = new FixtureMoltbookSource({ posts: [post] });

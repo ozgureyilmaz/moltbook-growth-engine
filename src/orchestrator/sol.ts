@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { deduplicatePosts, normalizePost } from "../discovery";
 import { scoreOpportunity, rankOpportunities } from "../analysis";
-import { generateCandidates } from "../generation";
+import { generateCandidates, generateCandidatesWithModel } from "../generation";
 import { finalDecision, IndependentMockEvaluator, ModelBackedCandidateEvaluator, type CandidateEvaluator } from "../evaluation";
 import { assignExperiment, makeExperimentRecord, ExperimentEngine } from "../experiments";
 import { makeActionPayload, makeNoAction, validateActionPayload } from "../outbox";
@@ -13,9 +13,10 @@ import { resolveRuntimeThresholds, type ResolvedRuntimeThresholds, type RuntimeT
 import { emitActionCreated, silentLogger, type GrowthEvent, type StructuredLogger } from "../telemetry";
 import { CodexExecExecutor, type ModelExecutor, type ModelTask } from "../models";
 import { loadPromptSync } from "../prompts/loader";
+import { planStrategyGenerationBatches } from "./shortlist";
 import { runBoundedWorkers, validateRuntimeWorkerReport, type BoundedWorkerBatch, type RuntimeWorkerInput } from "./workers";
 import { EvaluationResultSchema, QAResultSchema, RuntimeGeneratedCandidateSchema, RuntimeOpportunitySchema, ConversationContextSchema, MoltbookPostSchema, type ModelRunRecord } from "../schemas";
-import type { ActionPayload, ConversationContext, DiscoveryRequest, EvaluationResult, GeneratedCandidate, MoltbookPost, NoActionDecision, Opportunity, PersistenceLike, RunSummary, RuntimeWorkerRole, WorkerReport } from "./contracts";
+import type { ActionPayload, ConversationContext, DiscoveryRequest, EvaluationResult, GeneratedCandidate, MoltbookPost, NoActionDecision, Opportunity, PersistenceLike, PublishableCandidatePreparer, RunSummary, RuntimeWorkerRole, WorkerReport } from "./contracts";
 import type { MoltbookSource } from "../discovery";
 
 export type EvaluationMode = "deterministic_mock" | "real_model";
@@ -52,6 +53,8 @@ export type RunContext = {
 export type OrchestratorOptions = {
   discoveryLimit?: number;
   targetActions?: number;
+  /** Continue through qualified opportunities until targetActions pass QA. */
+  fillTargetActions?: boolean;
   lookbackHours?: number;
   dryRun?: boolean;
   runId?: string;
@@ -70,11 +73,19 @@ export type OrchestratorOptions = {
   modelExecutor?: ModelExecutor;
   model?: string;
   modelVersion?: string;
+  modelReasoningEffort?: string;
+  modelWorkingDirectory?: string;
   promptRoot?: string;
   workerConcurrency?: number;
   workerMaxAttempts?: number;
   workerRetryBackoffMs?: number;
   candidateCount?: number;
+  /** Maximum number of expensive strategy-generation tasks per batch. */
+  strategyGenerationBatchSize?: number;
+  /** Maximum number of qualified opportunities sent to strategy generation. */
+  strategyGenerationTaskBudget?: number;
+  /** Stop after this many consecutive strategy-generation failure batches. */
+  strategyGenerationFailureBudget?: number;
   minimumObservationsBeforeExploitation?: number;
   modelTimeoutMs?: number;
   modelMaxAttempts?: number;
@@ -82,6 +93,16 @@ export type OrchestratorOptions = {
   modelRetryBackoffMs?: number;
   /** Configured target domains used by action validation in both modes. */
   allowedDomains?: string[];
+  /** Article workflow can deliberately omit Marx agent reply quotes. */
+  includeAgentQuotes?: boolean;
+  includeSourceLink?: boolean;
+  sourceLink?: string;
+  /** Use the configured model for comment cores instead of deterministic templates. */
+  modelGenerateComments?: boolean;
+  /** Advisory calls are optional and must not block the primary publish path. */
+  enableWorkerAdvisory?: boolean;
+  /** Specific-cycle integrations may add a validated attribution link before final identity creation. */
+  preparePublishableCandidate?: PublishableCandidatePreparer;
 };
 
 export type OrchestratorResult = {
@@ -125,6 +146,8 @@ export class SolOrchestrator {
         maxAttempts: options.modelMaxAttempts,
         maxConcurrent: options.modelConcurrency,
         retryDelayMs: options.modelRetryBackoffMs,
+        reasoningEffort: options.modelReasoningEffort,
+        cwd: options.modelWorkingDirectory,
       })
       : undefined;
     const evaluator = this.evaluator ?? (evaluationMode === "real_model"
@@ -231,7 +254,7 @@ export class SolOrchestrator {
           const canonicalContext = ConversationContextSchema.parse(context);
           await this.persistWithContext("savePost", MoltbookPostSchema.parse(post), runContext);
           await this.persistWithContext("saveContext", canonicalContext, runContext);
-          const advisory = await runWorkerAdvisory(runtimeModelExecutor, task, "opportunity", { post, context: canonicalContext }, (record) => this.persistence.saveModelRun?.(record));
+          const advisory = options.enableWorkerAdvisory === false ? {} : await runWorkerAdvisory(runtimeModelExecutor, task, "opportunity", { post, context: canonicalContext }, (record) => this.persistence.saveModelRun?.(record));
           return {
             output: { post: MoltbookPostSchema.parse(post), context: canonicalContext },
             summary: `context fetched for ${post.postId}`,
@@ -278,7 +301,7 @@ export class SolOrchestrator {
             sourcePostId: post.postId,
           });
           await this.persistWithContext("saveOpportunity", opportunity, runContext);
-          const advisory = await runWorkerAdvisory(runtimeModelExecutor, task, "opportunity", { post, context }, (record) => this.persistence.saveModelRun?.(record));
+          const advisory = options.enableWorkerAdvisory === false ? {} : await runWorkerAdvisory(runtimeModelExecutor, task, "opportunity", { post, context }, (record) => this.persistence.saveModelRun?.(record));
           return {
             output: opportunity,
             summary: `opportunity scored for ${post.postId}`,
@@ -299,9 +322,21 @@ export class SolOrchestrator {
       summary.qualified = opportunities.length;
       logger.info("analysis_complete", { analyzed: summary.analyzed, qualified: summary.qualified });
       const engine = new ExperimentEngine(await this.loadExperiments());
-      const strategyBatch = await runBoundedWorkers<Opportunity, StrategyWorkerOutput>(
+      const strategyPlan = planStrategyGenerationBatches(opportunities, {
+        targetActions: runContext.targetActions,
+        fillTargetActions: options.fillTargetActions === true,
+        batchSize: options.strategyGenerationBatchSize,
+        taskBudget: options.strategyGenerationTaskBudget,
+      });
+      if (options.strategyGenerationFailureBudget !== undefined && (!Number.isSafeInteger(options.strategyGenerationFailureBudget) || options.strategyGenerationFailureBudget < 1)) {
+        throw new Error("strategyGenerationFailureBudget must be a positive integer");
+      }
+      let consecutiveStrategyFailureBatches = 0;
+      for (const strategyOpportunities of strategyPlan.batches) {
+        if (actions.length >= runContext.targetActions) break;
+        const strategyBatch = await runBoundedWorkers<Opportunity, StrategyWorkerOutput>(
         "strategy_generation",
-        opportunities.slice(0, runContext.targetActions).map((opportunity) => makeWorkerTask(runId, "strategy_generation", opportunity.opportunityId, opportunity, {
+        strategyOpportunities.map((opportunity) => makeWorkerTask(runId, "strategy_generation", opportunity.opportunityId, opportunity, {
           objective: "Assign an experiment arm and generate strategy-diverse candidates with attribution.",
           expectedOutputSchema: "StrategyWorkerOutput",
           promptVersion: promptVersions.generator,
@@ -316,12 +351,35 @@ export class SolOrchestrator {
             explorationRate: options.explorationRate,
             minimumObservationsBeforeExploitation: options.minimumObservationsBeforeExploitation,
           });
-          const candidateList = RuntimeGeneratedCandidateSchema.array().parse(generateCandidates(opportunity, [assignment.strategyFamily, ...opportunity.recommendedStrategies.filter((family) => family !== assignment.strategyFamily)], {
-            candidateCount: options.candidateCount ?? 4,
+          const strategyFamilies = [assignment.strategyFamily, ...opportunity.recommendedStrategies.filter((family) => family !== assignment.strategyFamily)];
+          const generationOptions = {
             runId,
             sourcePostId: opportunity.post.postId,
-          }));
-          const advisory = await runWorkerAdvisory(runtimeModelExecutor, task, "strategy", opportunity, (record) => this.persistence.saveModelRun?.(record));
+            includeAgentQuotes: options.includeAgentQuotes,
+            includeAgentQuoteSourceLink: options.preparePublishableCandidate ? false : undefined,
+            includeSourceLink: options.includeSourceLink,
+            sourceLink: options.sourceLink,
+          };
+          const generated = options.modelGenerateComments && runtimeModelExecutor
+            ? await generateCandidatesWithModel(opportunity, strategyFamilies.slice(0, 1), {
+              executor: runtimeModelExecutor,
+              model: options.model,
+              modelVersion: options.modelVersion,
+              promptRoot: options.promptRoot,
+              timeoutMs: options.modelTimeoutMs ?? 180_000,
+              maxAttempts: options.modelMaxAttempts ?? 1,
+              retryBackoffMs: options.modelRetryBackoffMs ?? 0,
+              runId,
+              sourcePostId: opportunity.post.postId,
+              includeAgentQuotes: options.includeAgentQuotes,
+              includeAgentQuoteSourceLink: options.preparePublishableCandidate ? false : undefined,
+              sourceLink: options.sourceLink,
+              maxCandidates: Math.min(options.candidateCount ?? 2, 2),
+              onModelRun: (record) => this.persistence.saveModelRun?.(record),
+            })
+            : generateCandidates(opportunity, strategyFamilies, { ...generationOptions, candidateCount: options.candidateCount ?? 4 });
+          const candidateList = RuntimeGeneratedCandidateSchema.array().parse(generated);
+          const advisory = options.enableWorkerAdvisory === false ? {} : await runWorkerAdvisory(runtimeModelExecutor, task, "strategy", opportunity, (record) => this.persistence.saveModelRun?.(record));
           return {
             output: { opportunity, candidateList },
             summary: `generated ${candidateList.length} strategy-diverse candidates for ${opportunity.post.postId}`,
@@ -336,12 +394,14 @@ export class SolOrchestrator {
       summary.modelCalls += countWorkerModelCalls(strategyBatch.reports);
       summary.errors += strategyBatch.failed.length;
       absorbWorkerReports(summary, strategyBatch.reports, "strategy_generation");
+      consecutiveStrategyFailureBatches = strategyBatch.failed.length > 0 ? consecutiveStrategyFailureBatches + 1 : 0;
       for (const item of strategyBatch.items) {
+        if (actions.length >= runContext.targetActions) break;
         const strategyOutput = item.output;
         const opportunity = strategyOutput?.opportunity ?? item.task.input;
         if (!strategyOutput) {
           summary.rejected += 1;
-          const fallback = makeNoAction(runId, opportunity.post.postId, "QUALITY_BELOW_THRESHOLD", opportunity.post.url, runContext.now);
+          const fallback = makeNoAction(runId, opportunity.post.postId, item.report.status === "FAILED" ? "WORKER_FAILURE" : "QUALITY_BELOW_THRESHOLD", opportunity.post.url, runContext.now);
           noActions.push(fallback);
           await this.persistWithContext("saveAction", fallback, runContext);
           continue;
@@ -350,6 +410,7 @@ export class SolOrchestrator {
         generatedCandidates.push(...candidateList);
         summary.generated += candidateList.length;
         let emitted = false;
+        let rejectionReason: NoActionDecision["reason"] | undefined;
         for (const candidate of candidateList) {
           await this.persistWithContext("saveCandidate", candidate, runContext);
           let evaluation: EvaluationResult;
@@ -357,6 +418,7 @@ export class SolOrchestrator {
           evaluation = EvaluationResultSchema.parse(await evaluator.evaluate(candidate, opportunity.context));
           } catch (error) {
             summary.errors += 1;
+            rejectionReason = "MODEL_FAILURE";
             recordFailure(summary, "model_failure", error, "evaluation", candidate.candidateId);
             logger.error("candidate_evaluation_failed", { candidateId: candidate.candidateId, error: String(error) });
             continue;
@@ -388,41 +450,70 @@ export class SolOrchestrator {
               ...thresholdDecision,
               allowed: false,
               reasons: [...thresholdDecision.reasons, "DECISION_NOT_PUBLISH"],
-            };
+              };
+          if (decision.kind === "no_action") rejectionReason = decision.decision.reason;
           if (evaluationWithQa.recommendation === "PUBLISH") summary.passedEvaluator += 1;
           if (decision.kind === "publish" && policyDecision.allowed) {
-            const experiment = makeExperimentRecord(runId, opportunity, candidate, decision.evaluation);
-            const action = makeActionPayload(runId, opportunity, candidate, decision.evaluation, runContext.now, experiment.experimentId);
-            if (!validateActionPayload(action as unknown, { mode: runContext.dryRun ? "dry-run" : "production", allowedDomains: options.allowedDomains ?? [] })) {
+            let publishableCandidate = candidate;
+            let publishablePreparation: Awaited<ReturnType<PublishableCandidatePreparer>> | undefined;
+            try {
+              publishablePreparation = options.preparePublishableCandidate
+                ? await options.preparePublishableCandidate({
+                  runId,
+                  opportunity,
+                  context: opportunity.context,
+                  candidate,
+                  evaluation: decision.evaluation,
+                  previousComments,
+                  createdAt: runContext.now,
+                })
+                : undefined;
+              publishableCandidate = publishablePreparation?.candidate ?? candidate;
+              RuntimeGeneratedCandidateSchema.parse(publishableCandidate);
+              if (publishablePreparation) {
+                const index = generatedCandidates.findIndex((entry) => entry.candidateId === candidate.candidateId);
+                if (index >= 0) generatedCandidates[index] = publishableCandidate;
+                await this.persistWithContext("saveCandidate", publishableCandidate, runContext);
+              }
+              const experiment = makeExperimentRecord(runId, opportunity, publishableCandidate, decision.evaluation);
+              const action = makeActionPayload(runId, opportunity, publishableCandidate, decision.evaluation, runContext.now, experiment.experimentId);
+              if (!validateActionPayload(action as unknown, { mode: runContext.dryRun ? "dry-run" : "production", allowedDomains: options.allowedDomains ?? [] })) {
+                summary.errors += 1;
+                recordFailure(summary, "invalid_schema", "action payload validation failed", "action", action.actionId);
+                logger.error("action_validation_failed", { actionId: action.actionId, experimentId: action.experiment.experimentId });
+                continue;
+              }
+              await publishablePreparation?.finalize(action, experiment);
+              if (!actions.some((existing) => existing.actionId === action.actionId)) {
+                actions.push(action);
+                experiments.push(experiment);
+                engine.record(experiment);
+                await this.persistWithContext("saveExperiment", experiment, runContext);
+                await this.persistWithContext("saveAction", action, runContext);
+                if (!summary.dryRun && this.outbox) await this.outbox.enqueue(action);
+                summary.actionsEmitted += 1;
+                emitted = true;
+                growthEvents.push(emitActionCreated(logger, {
+                  runId,
+                  actionId: action.actionId,
+                  experimentId: action.experiment.experimentId,
+                  occurredAt: runContext.now,
+                  properties: {
+                    dryRun: summary.dryRun,
+                    evaluationMode,
+                    sourceMode: runContext.sourceMode,
+                    strategyFamily: publishableCandidate.strategyFamily,
+                  },
+                }));
+                logger.info("action_accepted", { actionId: action.actionId, postId: postId(opportunity), strategyFamily: publishableCandidate.strategyFamily, score: evaluation.overallScore });
+              }
+              break;
+            } catch (error) {
               summary.errors += 1;
-              recordFailure(summary, "invalid_schema", "action payload validation failed", "action", action.actionId);
-              logger.error("action_validation_failed", { actionId: action.actionId, experimentId: action.experiment.experimentId });
-              continue;
+              rejectionReason = "PUBLISHING_RISK";
+              recordFailure(summary, "tracking_failure", error, "tracking", candidate.candidateId);
+              logger.error("publishable_candidate_preparation_failed", { candidateId: candidate.candidateId, error: String(error) });
             }
-            if (!actions.some((existing) => existing.actionId === action.actionId)) {
-              actions.push(action);
-              experiments.push(experiment);
-              engine.record(experiment);
-              await this.persistWithContext("saveExperiment", experiment, runContext);
-              await this.persistWithContext("saveAction", action, runContext);
-              if (!summary.dryRun && this.outbox) await this.outbox.enqueue(action);
-              summary.actionsEmitted += 1;
-              emitted = true;
-              growthEvents.push(emitActionCreated(logger, {
-                runId,
-                actionId: action.actionId,
-                experimentId: action.experiment.experimentId,
-                occurredAt: runContext.now,
-                properties: {
-                  dryRun: summary.dryRun,
-                  evaluationMode,
-                  sourceMode: runContext.sourceMode,
-                  strategyFamily: candidate.strategyFamily,
-                },
-              }));
-              logger.info("action_accepted", { actionId: action.actionId, postId: postId(opportunity), strategyFamily: candidate.strategyFamily, score: evaluation.overallScore });
-            }
-            break;
           }
           logger.warn("candidate_rejected", {
             postId: postId(opportunity),
@@ -434,10 +525,21 @@ export class SolOrchestrator {
         }
         if (!emitted) {
           summary.rejected += 1;
-          const fallback = makeNoAction(runId, opportunity.post.postId, "QUALITY_BELOW_THRESHOLD", opportunity.post.url, runContext.now);
+          const fallback = makeNoAction(runId, opportunity.post.postId, rejectionReason ?? "QUALITY_BELOW_THRESHOLD", opportunity.post.url, runContext.now);
           noActions.push(fallback);
           await this.persistWithContext("saveAction", fallback, runContext);
         }
+      }
+      if (
+        options.strategyGenerationFailureBudget !== undefined
+        && consecutiveStrategyFailureBatches >= options.strategyGenerationFailureBudget
+      ) {
+        logger.warn("strategy_generation_failure_budget_exhausted", {
+          consecutiveStrategyFailureBatches,
+          failureBudget: options.strategyGenerationFailureBudget,
+        });
+        break;
+      }
       }
     } catch (error) {
       summary.errors += 1;
@@ -616,7 +718,12 @@ async function runWorkerAdvisory<T>(
       errorMessage: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
       metadata: { worker: task.worker, stage, promptVersion: modelTask.promptVersion, expectedOutputSchema: modelTask.expectedOutputSchema },
     });
-    throw error;
+    // Advisory metadata must never block the primary deterministic/model
+    // generation path. The failure remains observable in model_runs.
+    return {
+      modelWorkerCalls: 0,
+      modelAdvisoryError: error instanceof Error ? error.message.slice(0, 240) : String(error).slice(0, 240),
+    };
   }
   return { modelWorkerCalls: 1, modelAttempts: result.attempts, modelSummary: result.output.summary };
 }

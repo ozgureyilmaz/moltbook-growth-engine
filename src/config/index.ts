@@ -51,6 +51,13 @@ export type RuntimeConfig = {
     contract_keychain_account?: string;
     contract_key_id?: string;
   };
+  tracking?: {
+    request_timeout_ms?: number;
+    max_retries?: number;
+    retry_backoff_ms?: number;
+    production?: TrackerEnvironmentConfig;
+    development?: TrackerEnvironmentConfig;
+  };
   operations?: {
     runtime_directory?: string;
     supervisor_lock_path?: string;
@@ -68,6 +75,15 @@ export type RuntimeConfig = {
     run_log_directory?: string;
     error_log_directory?: string;
   };
+};
+
+export type TrackerEnvironmentConfig = {
+  base_url?: string;
+  base_url_environment_variable?: string;
+  secret_provider?: "macos-keychain" | "environment";
+  token_environment_variable?: string;
+  keychain_service?: string;
+  keychain_account?: string;
 };
 
 export type RuntimeThresholds = {
@@ -197,6 +213,9 @@ function validateConfig(value: unknown): RuntimeConfig {
   const source = object(config.source);
   const publishing = object(config.publishing);
   const publisherBridge = object(config.publisher_bridge);
+  const tracking = object(config.tracking);
+  const trackingProduction = object(tracking?.production);
+  const trackingDevelopment = object(tracking?.development);
   const operations = object(config.operations);
   const safety = object(config.safety);
   const observability = object(config.observability);
@@ -223,6 +242,20 @@ function validateConfig(value: unknown): RuntimeConfig {
     if (value !== undefined && (typeof value !== "string" || value.trim() === "")) throw new Error(`config.publisher_bridge.${name} must be a non-empty string`);
   }
   positiveInteger("config.operations.heartbeat_stale_after_ms", operations?.heartbeat_stale_after_ms, 900_000);
+  positiveInteger("config.tracking.request_timeout_ms", tracking?.request_timeout_ms, 10_000);
+  nonNegativeInteger("config.tracking.max_retries", tracking?.max_retries, 2);
+  nonNegativeInteger("config.tracking.retry_backoff_ms", tracking?.retry_backoff_ms, 250);
+  for (const [name, environment] of [["production", trackingProduction], ["development", trackingDevelopment]] as const) {
+    if (!environment) continue;
+    for (const [field, fieldValue] of [["base_url", environment.base_url], ["keychain_service", environment.keychain_service], ["keychain_account", environment.keychain_account]] as const) {
+      if (fieldValue !== undefined && (typeof fieldValue !== "string" || fieldValue.trim() === "")) throw new Error(`config.tracking.${name}.${field} must be a non-empty string`);
+    }
+    for (const field of ["base_url_environment_variable", "token_environment_variable"] as const) {
+      const fieldValue = environment[field];
+      if (fieldValue !== undefined && (typeof fieldValue !== "string" || !/^[A-Z][A-Z0-9_]*$/u.test(fieldValue))) throw new Error(`config.tracking.${name}.${field} must be an uppercase environment variable name`);
+    }
+    if (environment.secret_provider !== undefined && (typeof environment.secret_provider !== "string" || !["macos-keychain", "environment"].includes(environment.secret_provider))) throw new Error(`config.tracking.${name}.secret_provider must be macos-keychain or environment`);
+  }
   stringList("config.safety.allowed_domains", safety?.allowed_domains);
   stringList("config.safety.allowed_redirect_domains", safety?.allowed_redirect_domains);
   fraction("config.thresholds.minimum_opportunity_score", thresholds?.minimum_opportunity_score, DEFAULT_RUNTIME_THRESHOLDS.minimumOpportunityScore);

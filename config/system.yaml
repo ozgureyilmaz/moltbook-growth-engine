@@ -23,7 +23,7 @@ model:
   structured_output_required: true
 
 source:
-  mode: authorized_autonomous
+  mode: live_read_only
   api_base_url: https://www.moltbook.com/api/v1
   secret_provider: macos-keychain
   api_key_environment_variable: MOLTBOOK_API_KEY
@@ -40,7 +40,7 @@ storage:
   busy_timeout_ms: 5000
 
 publishing:
-  enabled: true
+  enabled: false
   mode: downstream_agent
   platform: moltbook
   action_schema_version: "1.0"
@@ -50,7 +50,7 @@ publishing:
     failed_path: outbox/failed
 
 publisher_bridge:
-  enabled: true
+  enabled: false
   type: hermes_outbox
   binary: hermes
   provider: openai-codex

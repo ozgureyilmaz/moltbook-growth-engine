@@ -1,99 +1,18 @@
-project_dir=/Users/0x79de/Documents/ChatGPT/moltbook-growth-engine
-node_bin=/Users/0x79de/.nvm/versions/node/v22.17.0/bin/node
-publisher_python=/opt/homebrew/bin/python3
-publisher_script=/Users/0x79de/.hermes/skills/automation/moltbook-deterministic-publisher/scripts/publish_moltbook_action.py
-publisher_config=/Users/0x79de/.hermes/data/moltbook-publisher.json
+#!/usr/bin/env zsh
 
-export PATH=/Users/0x79de/.nvm/versions/node/v22.17.0/bin:/Users/0x79de/.local/bin:/usr/bin:/bin
-cd "$project_dir"
+# Checked-in command: local fixture verification only.
+# Keep production publishing commands outside the repository so credentials,
+# machine-specific paths, and live side effects cannot be triggered by copying
+# this file.
 set -euo pipefail
 
-# Configure authenticated tracker environments outside the repository before a cycle.
-# Development/staging is used without --publish; production is used only with --publish.
-# export MARX_TRACKER_DEVELOPMENT_BASE_URL="https://<staging-tracker-origin>"
-# export MARX_TRACKER_DEVELOPMENT_API_TOKEN="<staging-token>"
-# export MARX_TRACKER_API_TOKEN="<production-token>"
+project_dir="${MARX_GROWTH_PROJECT_DIR:-$(pwd)}"
+node_bin="${MARX_GROWTH_NODE:-node}"
 
-cycle_dir=""
-
-cleanup() {
-  "$node_bin" "$project_dir/dist/cli/main.js" ops kill-engage \
-    --reason "cycle stopped or completed" \
-    --actor ozgur >/dev/null 2>&1 || true
-
-  if [[ -n "$cycle_dir" ]]; then
-    rm -rf "$cycle_dir"
-  fi
-}
-
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap cleanup EXIT
-
-cycle_dir="$(mktemp -d -t marx-moltbook-cycle)"
-clearance_path="$cycle_dir/clearance.json"
-
-"$node_bin" "$project_dir/dist/cli/main.js" ops kill-clearance-create \
-  --output "$clearance_path" \
-  --minutes 30 \
-  --actor ozgur \
-  --reason "bounded Marx.finance autonomous cycle"
-
-"$node_bin" "$project_dir/dist/cli/main.js" ops kill-clear \
-  --clearance "$clearance_path"
-
-"$node_bin" "$project_dir/dist/cli/main.js" doctor \
-  --autonomous \
-  --live-read
-
-"$node_bin" "$project_dir/dist/cli/main.js" run \
-  --dry-run=false \
+cd "$project_dir"
+"$node_bin" dist/cli/main.js run \
+  --fixture tests/fixtures/moltbook.json \
+  --dry-run \
   --real-model=false \
-  --limit 5 \
+  --limit 100 \
   --actions 5
-
-"$publisher_python" "$publisher_script" \
-  --config "$publisher_config"
-
-cleanup
-cycle_dir=""
-
-# Single-command discovery -> tracked Marx comments -> publish.
-# Remove --publish for a read-only dry-run.
-# The publish gate still requires authorized_autonomous config, a cleared
-# kill switch, valid publisher contract, and verified provider readback.
-# "$node_bin" "$project_dir/dist/cli/main.js" marx-specific-cycle \
-#   --article-url https://marx.finance/feed/a3cb1cc9fcfa4449aae079cd0c3e28dd \
-#   --limit 20 \
-#   --actions 5 \
-#   --no-agent-quotes \
-#   --publish \
-#   --output docs/moltbook-runs/
-
-# Single-command discovery -> tracked Marx comments with Marx agent quotes -> publish.
-# Use this variant when the comment should quote the relevant Marx agent reply.
-# Remove --publish for a read-only dry-run.
-# "$node_bin" "$project_dir/dist/cli/main.js" marx-specific-cycle \
-#   --article-url https://marx.finance/feed/a3cb1cc9fcfa4449aae079cd0c3e28dd \
-#   --limit 20 \
-#   --actions 5 \
-#   --with-agent-quotes \
-#   --publish \
-#   --output docs/moltbook-runs/
-
-# Specific Marx Feed -> Moltbook cycle (copy/paste one command after build).
-# Dry-run: omit --publish.
-# Publish: add --publish only after the preflight is intentionally cleared.
-#
-# "$node_bin" "$project_dir/dist/cli/main.js" marx-specific-cycle \
-#   --article-url https://marx.finance/feed/500cf34bfaa84944ab840cd32adc8849 \
-#   --post-ids 9806a9ea-b3ca-444d-9ec5-586a4c6d3142,f584fe1c-e324-4ce2-852b-9f3c72a10916,5393e8d9-f042-413f-afbf-4db90ea4466d,14ad54f7-5bad-48ce-9565-a9aee2b81fbe,59d6c75a-1933-41da-8185-8d2d8a15601e \
-#   --no-agent-quotes \
-#   --output docs/moltbook-runs/specific-500cf34bfaa84944ab840cd32adc8849.md
-#
-# Second-feed read-only verification:
-# "$node_bin" "$project_dir/dist/cli/main.js" marx-specific-cycle \
-#   --article-url https://marx.finance/feed/ce109d1ea5d84dce815b2ecf04e9306e \
-#   --post-ids f07cebcd-bee5-4b04-bc88-ce698ada6af3,b1bce811-ef25-4643-ae57-9c5290b0705c,c781764f-048a-4157-a29f-ec2dc09ca536,f96b82c2-80f7-4f54-beff-05a73aa90331,da32f2e9-82f6-40dd-b515-c0bd2cba73e0 \
-#   --no-agent-quotes \
-#   --output docs/moltbook-runs/specific-ce109d1ea5d84dce815b2ecf04e9306e.md

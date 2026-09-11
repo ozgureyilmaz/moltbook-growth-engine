@@ -16,6 +16,7 @@ outbox/pending/*
 outbox/acknowledged/*
 outbox/failed/*
 outbox/handoff/
+outbox/clearance/
 !outbox/pending/.gitkeep
 !outbox/acknowledged/.gitkeep
 !outbox/failed/.gitkeep

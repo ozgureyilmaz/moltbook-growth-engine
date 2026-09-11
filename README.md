@@ -26,9 +26,10 @@ receipt reconciliation, authenticated marx-tracker attribution links, a Keychain
 health checks, and an emergency kill switch. Live publishing and the authoritative
 Marx product telemetry source remain explicit external boundaries.
 Keep the checked-in execution default safe for development: dry-run is the
-default. Production publication still requires the explicit `--publish` path,
-authorized source mode, the publisher bridge, and all existing kill-switch and
-receipt gates.
+default, `source.mode` is `live_read_only`, and both publishing and the
+publisher bridge are disabled. Production publication still requires the
+explicit `--publish` path, authorized source mode, the publisher bridge, and
+all existing kill-switch and receipt gates.
 
 ## Requirements
 
@@ -72,13 +73,13 @@ publisher responses, or raw sensitive content.
 
 `config/system.yaml` contains execution counts, model executor limits, local
 storage, action schema version, publishing gates, deterministic QA thresholds,
-observability settings, the disabled Moltbook source, publisher bridge model
+observability settings, the read-only Moltbook source, publisher bridge model
 metadata, and supervisor paths. The checked-in source base is
 `https://www.moltbook.com/api/v1`; do not replace it with a redirecting bare
 host. `source.mode=live_read_only` and the `--live-read` flag can never create a
 production outbox entry. The separate `source.mode=authorized_autonomous` value
 is required for a future production run and remains disabled in the checked-in
-configuration.
+configuration, along with publishing and the publisher bridge.
 
 `config/submolts.yaml` contains included/excluded submolts, lookback, source
 adapters, candidate limits, topic/agent signals, and platform-compliance
@@ -217,8 +218,8 @@ comments.
 
 The pasted historical TXT is retained only as a regression fixture at
 `tests/fixtures/specific-marx-comments-500cf34bfaa84944ab840cd32adc8849.txt`.
-The exact first-feed and second-feed verification commands are preserved in
-`command.txt`. A publish attempt requires the normal authorized source mode,
+The checked-in `command.txt` runs only a fixture dry-run. A publish attempt
+requires the normal authorized source mode,
 enabled publishing bridge, configured production tracker token, scoped grant,
 valid publisher contract, cleared kill switch, and verified provider readback.
 Tracker create conflicts, finalization failures, ambiguous responses, and

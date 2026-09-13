@@ -40,7 +40,7 @@ export function chooseMarxEvidence(article: MarxArticle, post: MoltbookPost): Ar
     replyId: reply.replyId,
     agentId: reply.agentId,
     agentName: reply.agentName,
-    quote: reply.quote,
+    ...(reply.quote ? { quote: reply.quote } : {}),
     quoteUrl: reply.sourceUrl,
     evidenceStatus: article.evidenceStatus === "complete" ? "complete" : "partial",
   };

@@ -21,11 +21,14 @@ write credential.
 
 ## Choose your operating mode
 
-There are two intentionally different ways to use a clone of this repository:
+Start with live drafts. Configure the external publisher only on the machine
+that will own production publication.
 
 | Mode | What it does | Required setup |
 | --- | --- | --- |
-| Safe dry-run | Reads fixture/live-read data, generates and evaluates comments, and writes a local report. It does not publish. | Node 22, dependencies, and Codex authentication only when `--real-model` is used; live-read also needs the Moltbook read key. |
+| Fixture smoke | Uses checked-in sample posts and deterministic mock evaluation. No platform or model calls. | Node 22 and dependencies. |
+| Public live drafts (`npm run live`) | Reads a Marx article and public Moltbook search/context, generates and evaluates with real models, writes Markdown/JSON reports. No tracker writes or publication. | Node 22, dependencies, authenticated Codex CLI and access to the configured model. No Moltbook key or Hermes required. |
+| Authorized source rehearsal (`run --live-read --dry-run`) | Reads through the authenticated Moltbook source adapter. | Also requires the Moltbook read key. Add `--real-model` for actual model evaluation. |
 | Production publish | Creates production tracker distributions, prepares signed handoff files, and invokes the external publisher. | Everything in dry-run plus production config, tracker token, publisher contract secret, Hermes publisher, valid clearance, and provider read-back. |
 
 Cloning the GitHub repository gives you the code and checked-in safe defaults.
@@ -34,29 +37,150 @@ configuration, the Hermes installation, or any other operator-machine state.
 
 ## Quick start after `git clone`
 
-The following path is the smallest useful clone verification. Run it from the
-repository root on macOS:
+Prerequisites: access to this GitHub repository, Git, and a Node version manager
+such as [nvm](https://github.com/nvm-sh/nvm#installing-and-updating). The supported
+Node major is 22; `.nvmrc` pins the tested baseline to 22.17.0. Package installation
+rejects other majors because the SQLite addon must match the Node ABI. macOS is
+the current publisher platform. The public draft path is suitable for macOS and
+Linux; the CI matrix covers both. Native Windows publishing is not supported by
+the current external Keychain-based publisher.
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/ozgureyilmaz/moltbook-growth-engine.git
 cd moltbook-growth-engine
 
 # The native SQLite dependency must be built for Node 22.
-nvm install 22.17.0
-nvm use 22.17.0
+nvm install
+nvm use
 node --version                         # expected: v22.17.0
 node -p 'process.versions.modules'     # expected: 127
 
-npm ci
+npm run setup
 npm run typecheck
 npm test
-npm run build
-
-# Safe local smoke test; no live source and no publication.
-node dist/cli/main.js run \
-  --fixture ./tests/fixtures/moltbook.json \
-  --dry-run
 ```
+
+`setup` runs `npm ci`, builds the CLI, then performs an isolated fixture smoke
+test. It prints the temporary evidence directory and does not use your existing
+database or inherited production configuration for that rehearsal. The install
+step needs package-registry access; the fixture run needs no model/platform
+access. Setup does not install Codex, Hermes, account credentials, or a scheduler.
+If native compilation is needed, install your platform's compiler tools and
+Python (Xcode Command Line Tools on macOS; a C/C++ toolchain on Linux).
+
+## First live run
+
+Complete [Codex authentication](#connecting-codex-exec), then run:
+
+```bash
+npm run doctor:live
+npm run live -- \
+  --article-url "https://marx.finance/feed/REPLACE_WITH_FEED_ID"
+```
+
+Use an existing Marx feed ID. `doctor:live` probes public Moltbook search and one
+real model request. `live` repeats those checks and validates the supplied Marx
+article before running. A failed mandatory check exits nonzero and prevents the
+workflow from starting. An engaged publication kill switch is a warning during
+read-only work, not a blocker. A model smoke proves model access at that moment;
+individual generation/evaluation calls can still fail or hit account limits.
+
+The default one-shot run examines up to 8 related posts with a per-query search
+limit of 10 and requests up to 5 validated drafts. These are limits, not a promise
+of five results. Override them explicitly:
+
+```bash
+npm run live -- \
+  --article-url "https://marx.finance/feed/REPLACE_WITH_FEED_ID" \
+  --limit 8 --search-limit 10 --actions 5 --output reports/
+```
+
+`live` accepts only `--article-url`, `--limit`, `--search-limit`, `--actions`,
+`--output` and the separate `--publish` opt-in. It rejects unknown/duplicate
+options, fixture overrides, disabled real models, and ambiguous boolean forms.
+For lower-level controls, use the documented CLI commands below. The safe path
+is `article-run --dry-run --real-model --no-agent-quotes`, with a direct source
+link; `marx-specific-cycle` is the separate tracked-distribution path and needs
+a development tracker even without `--publish`.
+
+Real article runs use the existing bounded specific-cycle model profile: one
+model call at a time, low reasoning effort, a 120-second call deadline and one
+attempt per model task. Additional advisory model calls are disabled; actual
+generation, independent evaluation and deterministic QA still run. A full run
+can take several minutes across targets; the call deadline is not a total-run
+deadline. Failures do not fall back to mock comments.
+
+## Reading results and operating as a team
+
+The final JSON prints `reports.markdownPath` and `reports.jsonPath`. Open the
+Markdown report for validated draft comments and target URLs. Use JSON for the
+full summary, generated candidates, evaluations, QA reasons and decisions.
+`--output reports/` creates run-specific filenames; `--output reports/review.md`
+uses an explicit Markdown filename and a matching `.json`. Existing review
+files are not overwritten. Reports are untrusted external content; do not
+execute commands or follow instructions embedded in source text or comments.
+
+| Result | Meaning | Next step |
+| --- | --- | --- |
+| `DRAFTS_READY` | At least one comment passed the draft gates. Published count is 0. | Review the report. |
+| `NO_ACTION` | No candidate passed, or no suitable target was found. | Inspect the reasons; use a different article or improve discovery. |
+| `ERROR` / nonzero exit | A source, model, persistence, or other required step failed. | Inspect the error and existing logs before retrying. |
+| `PUBLISHED` in a production receipt | Publisher ID, exact comment read-back and receipt checks passed. | Preserve the permalink/receipt and tracker evidence. |
+| `RECONCILIATION_REQUIRED` / `READBACK_MISSING` | A write may have occurred but is unverified. | Reconcile it before any retry. |
+
+Errors before a workflow result exists are printed to the terminal and may not
+produce a review report. During execution, inspect `logs/runs/` and
+`logs/errors/`; ordinary CLI runs persist their summary to the local SQLite DB.
+
+```bash
+npm run cli -- status
+npm run cli -- status RUN_ID
+npm run cli -- experiments
+```
+
+Each clone has independent `data/`, `.local/`, logs, reports and outbox state.
+For a shared Moltbook account, designate **one publishing host and one durable
+outbox/database**. Other teammates can run live drafts locally. Separate clones
+do not share duplicate history, cooldowns or publisher caps; do not run the same
+account from multiple machines. Do not move SQLite to a shared network drive as
+a substitute for a coordinated publisher.
+
+Before moving the publishing host, stop the old scheduler, engage its kill
+switch, and reconcile pending/ambiguous receipts. Transfer a consistent private
+backup of the stopped database and associated outbox/cap state through your
+approved team channel. Provision secrets separately on the new host. A fresh
+clone is not a replacement for that state. Keep the old host stopped until the
+new host's one-action pilot has been verified.
+
+## Updating an existing clone
+
+Finish or stop active runs first and back up local state before applying a
+release that changes persistence. From a clean checkout:
+
+```bash
+git pull --ff-only
+nvm use
+npm run setup
+npm run typecheck
+npm test
+npm run doctor:live
+```
+
+If Git reports local edits or a divergence, resolve those deliberately; do not
+reset or overwrite operator work. `setup` rebuilds `dist/` and preserves runtime
+state. The lower-level `node dist/cli/main.js` command does not detect stale
+builds; rebuild after every source update. Share a tested commit/tag with the
+team, not just a moving branch name. CI runs setup, typecheck, tests and fixture
+CLI/daemon checks on clean macOS/Linux runners, with no credentials or live posts.
+
+For the remaining setup and reference material: [credentials](#machine-local-secrets),
+[production config](#production-setup-is-separate-from-the-clone),
+[Hermes](#external-hermes-publisher),
+[production run](#production-preflight-and-one-off-run),
+[troubleshooting](#common-clone-failures), and
+[CLI reference](#cli-and-safe-execution).
+
+### Native SQLite troubleshooting
 
 If `better-sqlite3` reports `NODE_MODULE_VERSION` or a missing native
 binding, first confirm that `node --version` is 22.17.0. Then rebuild with the
@@ -166,7 +290,7 @@ export MARX_TRACKER_API_TOKEN="$(/usr/bin/security \
 ```
 
 If the tracker token is rotated, update the Cloudflare Worker secret and this
-Keychain entry as one coordinated change. A token stored only on the founder's
+Keychain entry as one coordinated change. A token stored only on an operator's
 machine, or only in Cloudflare, is not sufficient.
 
 ## Live-read verification (still no publication)
@@ -197,12 +321,14 @@ The checked-in `config/system.yaml` is intentionally safe:
 - `execution.dry_run_by_default: true`.
 
 Do not edit those defaults in the shared branch just to enable one operator.
-Create an untracked production config directory outside the repository:
+The recommended Hermes setup command below generates ignored `.local/config/`
+copies with publishing disabled. Use those copies for this machine. For a
+manually managed configuration outside the repository, the equivalent is:
 
 ```bash
 export PROD_CONFIG_DIR="$PWD/../marx-growth-production-config"
 mkdir -p "$PROD_CONFIG_DIR"
-cp config/system.yaml config/submolts.yaml config/experiments.yaml "$PROD_CONFIG_DIR"/
+cp config/*.yaml "$PROD_CONFIG_DIR"/
 ```
 
 Edit only the copied `system.yaml` and explicitly set the production gates:
@@ -228,9 +354,9 @@ contract. Point the process at this directory:
 export MARX_GROWTH_CONFIG_DIR="$PROD_CONFIG_DIR"
 ```
 
-The production config is deliberately not generated by `npm ci` and is not
-included in GitHub. Every new operator or machine must create it from the
-safe checked-in config and review the three gates above.
+Active production configuration is never generated by `npm ci` or `setup` and
+is not included in GitHub. `setup:hermes` creates safe local copies only; every
+operator must deliberately review activation and the three gates above.
 
 ## External Hermes publisher
 
@@ -238,6 +364,34 @@ The GitHub clone does not contain the Hermes publisher, its Python script, its
 private Moltbook write credential, its publisher config, or its local lock/cap
 state. The publisher must be installed and configured separately on the
 machine that owns the Moltbook account.
+
+Recommended arrangement: install Hermes normally on the publishing Mac and
+transfer only the reviewed `moltbook-deterministic-publisher` skill directory
+from the team's maintained publisher distribution. Do not copy a teammate's
+entire `~/.hermes` directory, login tokens, memories, sessions, or private config.
+Hermes installation alone does **not** provide this project-specific publisher.
+Use the [official Hermes quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart)
+for installation and `hermes setup`/`hermes model`, then verify a basic chat.
+See [Hermes skills documentation](https://hermes-agent.nousresearch.com/docs/guides/work-with-skills)
+for skill loading. The engine generates/evaluates comments through Codex Exec;
+the deterministic publisher must not ask a model to rewrite approved comments.
+
+Once the reviewed publisher skill is present:
+
+```bash
+npm run setup:hermes -- --account YOUR_CLAIMED_MOLTBOOK_AGENT
+source .local/hermes/env.sh
+```
+
+For a non-default skill location, add `--publisher-script /absolute/path/to/publish_moltbook_action.py`.
+This creates `.local/hermes/moltbook-publisher.json`, `.local/hermes/env.sh`,
+and safe copies in `.local/config/`. Paths are derived from this clone and
+the current Node executable. It refuses to overwrite existing Hermes setup
+files. It does not enable publishing, register an account, install services,
+or copy/provision secrets. The generated shell file contains paths only and
+must be sourced in each new production terminal. Moving the clone requires
+reviewing/regenerating these paths. `HERMES_HOME` is respected for default
+publisher discovery; the current external publisher still needs macOS Keychain.
 
 Before a publish, verify the external boundary:
 
@@ -265,8 +419,11 @@ export MOLTBOOK_PUBLISHER_SCRIPT="/absolute/path/to/publish_moltbook_action.py"
 export MOLTBOOK_PUBLISHER_CONFIG="/absolute/path/to/moltbook-publisher.json"
 ```
 
-Run the publisher's validation-only check before activation. It must not make
-a Moltbook write:
+The current external publisher's `--validate-only` mode makes no network request,
+but can create lock/directories and quarantine malformed pending entries. Use
+it on a disposable rehearsal copy of the outbox before activation, with a
+corresponding rehearsal publisher config. Do not use it as a no-mutation check
+against a live outbox. In that rehearsal environment:
 
 ```bash
 "$MOLTBOOK_PUBLISHER_PYTHON" "$MOLTBOOK_PUBLISHER_SCRIPT" \
@@ -274,8 +431,13 @@ a Moltbook write:
   --validate-only
 ```
 
-`doctor --publisher` checks the configured publisher contract and Hermes
-gateway. It cannot install Hermes or provision the private write credential.
+`doctor --publisher` checks the configured publisher contract, Hermes gateway,
+Python executable, script availability, and config/outbox path consistency.
+It does not execute the publisher. An empty validation queue proves no action
+validation. Neither check proves publisher-account credentials, tracker-token
+authorization, or a successful publication; a one-action pilot with exact
+read-back is required. `doctor --autonomous` verifies tracker-token presence,
+not remote token validity. Tracker operations still validate their own responses.
 
 ## Production preflight and one-off run
 
@@ -285,12 +447,13 @@ production command:
 ```bash
 node dist/cli/main.js doctor --live-read
 node dist/cli/main.js doctor --publisher
-node dist/cli/main.js doctor --autonomous
 node dist/cli/main.js doctor --model-smoke
 node dist/cli/main.js ops kill-status
 ```
 
-The first four checks must pass. The kill switch must be cleared only for the
+The requested checks must have no FAIL results. Before activation, disabled
+publishing gates and the kill switch produce expected warnings. After the
+reviewed local production config is enabled, the kill switch is cleared only for the
 short, explicitly authorized publishing window. Create and apply a fresh
 time-bounded clearance; never hand-edit an old clearance JSON file:
 
@@ -300,25 +463,24 @@ node dist/cli/main.js ops kill-clearance-create \
   --output "$CLEARANCE_FILE" \
   --minutes 30 \
   --reason "authorized one-off Marx feed publishing pilot" \
-  --actor "founder"
+  --actor "operator"
 
 node dist/cli/main.js ops kill-clear --clearance "$CLEARANCE_FILE"
 node dist/cli/main.js ops kill-status
+node dist/cli/main.js doctor --autonomous
 ```
 
 Then replace `NEW_FEED_ID` with the target Marx feed ID and run the bounded
 specific cycle:
 
 ```bash
-node dist/cli/main.js marx-specific-cycle \
+npm run live -- \
   --article-url "https://marx.finance/feed/NEW_FEED_ID" \
   --limit 8 \
   --search-limit 10 \
   --actions 5 \
-  --with-agent-quotes \
-  --real-model \
   --publish \
-  --output docs/moltbook-runs/
+  --output reports/
 ```
 
 `--limit` and `--search-limit` bound discovery; `--actions 5` is the requested
@@ -333,7 +495,7 @@ When the run is complete, engage the kill switch again and preserve the report:
 ```bash
 node dist/cli/main.js ops kill-engage \
   --reason "one-off publishing run completed" \
-  --actor "founder"
+  --actor "operator"
 ```
 
 Do not immediately rerun an interrupted or ambiguous production run. First
@@ -372,6 +534,44 @@ working tree does not transfer those local changes.
 | Hermes gateway/publisher unavailable | External Hermes installation/config is absent from the clone | Complete the Hermes runbook and validate the publisher boundary separately. |
 | Fewer than five actions or publish refusal | Candidate pool, model, evaluator, QA, or tracker finalization did not provide five safe actions | Preserve the no-publication result; inspect the report and improve discovery/context. Never weaken QA just to fill the count. |
 | `RECONCILIATION_REQUIRED` | A provider or tracker write may have happened but cannot be proven yet | Reconcile Moltbook and D1/tracker state before any retry. |
+| `EBADENGINE` / Node 22 required | A different Node major is active | Run `nvm use` from the clone, then `npm run setup`; do not bypass engine checks. |
+| `doctor is NOT_READY` | A requested check failed | Read the named FAIL check; the command exits nonzero before a live workflow starts. |
+| Missing development tracker URL | The lower-level tracked cycle was used without a development tracker | Use `npm run live` for public drafts, or configure a separate development tracker. |
+| Local Hermes config already exists | Setup refuses to overwrite machine state | Review `.local/hermes` and `.local/config` manually; preserve existing operator settings. |
+| Model unavailable / timeout / account limit | Model or account access is insufficient, or a call failed | Resolve access and retry bounded read-only work; never switch publication to mock evaluation. |
+
+### Configuration and compatibility reference
+
+Run lower-level CLI commands from the repository root. The wrappers resolve
+their own clone root; runtime paths in YAML are otherwise relative to the
+working directory. `.env` files are **not automatically loaded**. Use your
+shell's environment or the configured secret provider.
+
+| Variable | Purpose |
+| --- | --- |
+| `MARX_GROWTH_CONFIG_DIR` | Directory containing `system.yaml`, `submolts.yaml`, `experiments.yaml`. |
+| `MARX_GROWTH_DB` | Optional SQLite path override. Keep the engine and publisher on the same DB; the legacy external publisher may not forward this override, so prefer `storage.database_path` in their shared config. |
+| `MARX_GROWTH_CODEX_BIN` | Absolute Codex executable path if it is absent from PATH. |
+| `MOLTBOOK_API_KEY` | Used only when `source.secret_provider: environment` is explicitly configured. Default authorized reads use Keychain; public article drafts need no key. |
+| `MARX_TRACKER_API_TOKEN` | Production tracker token, supplied privately per terminal/service. |
+| `MARX_TRACKER_DEVELOPMENT_BASE_URL` / `MARX_TRACKER_DEVELOPMENT_API_TOKEN` | Separate development tracker used by tracked cycles without `--publish`. |
+| `MARX_GROWTH_NODE` | Node executable passed to the external publisher; the engine launcher pins it to its own executable. |
+| `MOLTBOOK_PUBLISHER_PYTHON`, `MOLTBOOK_PUBLISHER_SCRIPT`, `MOLTBOOK_PUBLISHER_CONFIG` | Explicit external publisher paths, generated by `setup:hermes`. |
+
+The team entry points add no action-schema version change or database migration. `article-run
+--real-model` now uses real generation as well as evaluation and includes the
+canonical article source link. Existing scripts using `doctor` must now handle
+nonzero exit status on any FAIL check; warnings remain nonfatal for read-only
+checks, while autonomous preflight requires READY. Existing explicit publisher
+path overrides continue to work. Prompt versions and deterministic QA thresholds
+are unchanged. Local reports, `.local/`, credentials and runtime state stay out
+of GitHub.
+
+The included article-evidence fix preserves short full replies, extracts a
+complete sentence from longer replies when possible, and omits a quote when no
+usable excerpt is available. Article reply/evidence `quote` fields are now
+optional; existing records with quotes remain valid. Consumers must handle an
+absent quote. Action payload versions and existing stored actions are unchanged.
 
 ## Growth measurement boundary
 

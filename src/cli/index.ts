@@ -2,6 +2,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { publisherRuntime, checkPublisherFiles } from "../operations/publisher-runtime";
+import { writeArticleReport } from "../telemetry/article-report";
+import { fetchMarxArticle } from "../article/source";
 import {
   ConfiguredMoltbookSource,
   AuthorizedMoltbookSource,
@@ -104,7 +107,7 @@ export function specificRealModelRuntimeOptions(): Pick<OrchestratorOptions, "wo
     modelReasoningEffort: "low",
     modelWorkingDirectory: "/tmp",
     strategyGenerationBatchSize: 1,
-    strategyGenerationTaskBudget: 8,
+    strategyGenerationTaskBudget: 10,
     strategyGenerationFailureBudget: 2,
   };
 }
@@ -357,16 +360,8 @@ async function writeSpecificCycleOutput(
 }
 
 async function runConfiguredPublisher(options: Record<string, string | boolean>): Promise<string> {
-  const python = typeof options["publisher-python"] === "string"
-    ? options["publisher-python"]
-    : process.env.MOLTBOOK_PUBLISHER_PYTHON ?? "/opt/homebrew/bin/python3";
-  const script = typeof options["publisher-script"] === "string"
-    ? options["publisher-script"]
-    : process.env.MOLTBOOK_PUBLISHER_SCRIPT ?? "/Users/0x79de/.hermes/skills/automation/moltbook-deterministic-publisher/scripts/publish_moltbook_action.py";
-  const config = typeof options["publisher-config"] === "string"
-    ? options["publisher-config"]
-    : process.env.MOLTBOOK_PUBLISHER_CONFIG ?? "/Users/0x79de/.hermes/data/moltbook-publisher.json";
-  const result = await execFileAsync(python, [script, "--config", config], { encoding: "utf8", timeout: 240_000, maxBuffer: 2 * 1024 * 1024 });
+  const { python, script, config } = publisherRuntime(options);
+  const result = await execFileAsync(python, [script, "--config", config], { encoding: "utf8", timeout: 240_000, maxBuffer: 2 * 1024 * 1024, env: { ...process.env, MARX_GROWTH_NODE: process.execPath } });
   return result.stdout.trim();
 }
 
@@ -381,14 +376,14 @@ function configuredLogger(runId: string, settings: ResolvedRuntimeSettings): Jso
 
 export async function runCli(argv: string[], dependencies: CliDependencies = {}): Promise<string> {
   if (argv[0] === "--help" || argv[0] === "-h") {
-    const help = "Usage: marx-growth <run|article-run|marx-specific-cycle|status|experiments|replay|daemon|doctor|handoff|outcomes|ops> [options]\n\nrun options: --fixture <path> | --live-read --limit <n> --actions <n> --lookback <hours> --dry-run [--real-model]\narticle-run: article-run --article-url <https://marx.finance/feed/...> --dry-run --limit <n> --actions <n> [--real-model] [--no-agent-quotes] [--post-ids <id1,id2,...>]\nmarx-specific-cycle: marx-specific-cycle --article-url <https://marx.finance/feed/...> [--post-ids <id1,id2,...>] [--limit <n> --actions <n>] [--with-agent-quotes|--no-agent-quotes] [--publish] [--output <path>]\nstatus: status [run_id]\nexperiments: experiments\nreplay: replay <run_id> --fixture <path> --dry-run\ndaemon: daemon --once --supervised --interval <ms> | --cron \"<expression>\"\ndoctor: doctor [--live-read] [--publisher] [--autonomous] [--model-smoke]\nhandoff: promote <run_id> <action_id>... | prepare <action_id> --grant <file> --publisher-account <name> | import-receipt <request_id> --receipt <file>\noutcomes: outcomes import --events <file>\nops: kill-status | kill-engage --reason <text> --actor <name> | kill-clearance-create --output <file> [--minutes <n>] | kill-clear --clearance <file>";
+    const help = "Usage: marx-growth <run|article-run|marx-specific-cycle|status|experiments|replay|daemon|doctor|handoff|outcomes|ops> [options]\n\nrun options: --fixture <path> | --live-read --limit <n> --actions <n> --lookback <hours> --dry-run [--real-model]\narticle-run: article-run --article-url <https://marx.finance/feed/...> --dry-run --limit <n> --actions <n> [--real-model] [--no-agent-quotes] [--post-ids <id1,id2,...>] [--output <directory|file.md>]\nmarx-specific-cycle: marx-specific-cycle --article-url <https://marx.finance/feed/...> [--post-ids <id1,id2,...>] [--limit <n> --actions <n>] [--with-agent-quotes|--no-agent-quotes] [--publish] [--output <path>]\nstatus: status [run_id]\nexperiments: experiments\nreplay: replay <run_id> --fixture <path> --dry-run\ndaemon: daemon --once --supervised --interval <ms> | --cron \"<expression>\"\ndoctor: doctor [--public-read] [--article-url <url>] [--live-read] [--publisher] [--autonomous] [--model-smoke]\nhandoff: promote <run_id> <action_id>... | prepare <action_id> --grant <file> --publisher-account <name> | import-receipt <request_id> --receipt <file>\noutcomes: outcomes import --events <file>\nops: kill-status | kill-engage --reason <text> --actor <name> | kill-clearance-create --output <file> [--minutes <n>] | kill-clear --clearance <file>";
     (dependencies.stdout ?? ((line: string) => console.log(line)))(help);
     return help;
   }
   const parsed = parseArgs(argv);
   const output = dependencies.stdout ?? ((line: string) => console.log(line));
   if (parsed.options.help) {
-    const help = "Usage: marx-growth <run|article-run|marx-specific-cycle|status|experiments|replay|daemon|doctor|handoff|outcomes|ops> [options]\n\nrun options: --fixture <path> | --live-read --limit <n> --actions <n> --lookback <hours> --dry-run [--real-model]\nmarx-specific-cycle: marx-specific-cycle --article-url <https://marx.finance/feed/...> [--post-ids <id1,id2,...>] [--limit <n> --actions <n>] [--with-agent-quotes|--no-agent-quotes] [--publish] [--output <path>]\ndoctor: doctor [--live-read] [--publisher] [--autonomous] [--model-smoke]";
+    const help = "Usage: marx-growth <run|article-run|marx-specific-cycle|status|experiments|replay|daemon|doctor|handoff|outcomes|ops> [options]\n\nrun options: --fixture <path> | --live-read --limit <n> --actions <n> --lookback <hours> --dry-run [--real-model]\nmarx-specific-cycle: marx-specific-cycle --article-url <https://marx.finance/feed/...> [--post-ids <id1,id2,...>] [--limit <n> --actions <n>] [--with-agent-quotes|--no-agent-quotes] [--publish] [--output <path>]\ndoctor: doctor [--public-read] [--article-url <url>] [--live-read] [--publisher] [--autonomous] [--model-smoke]";
     output(help);
     return help;
   }
@@ -423,6 +418,20 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         };
       },
     ];
+    if (booleanOption(parsed.options["public-read"]) === true) {
+      runners.push(async () => {
+        const client = new MoltbookHttpClient({ secretProvider: new EnvironmentSecretProvider({}), secretReference: { name: "unused-public-read-key" }, publicReadOnly: true, timeoutMs: config.source?.request_timeout_ms });
+        await client.searchPosts("agents", 1);
+        return { name: "moltbook-public-read", status: "PASS", message: "Official public search GET succeeded; no authentication or write was attempted", checkedAt: checkedAt.toISOString() };
+      });
+    }
+    if (typeof parsed.options["article-url"] === "string") {
+      const articleUrl = parsed.options["article-url"];
+      runners.push(async () => {
+        await fetchMarxArticle(articleUrl, { timeoutMs: config.source?.request_timeout_ms });
+        return { name: "marx-article-read", status: "PASS", message: "Marx article GET and schema validation succeeded", checkedAt: checkedAt.toISOString() };
+      });
+    }
     if (booleanOption(parsed.options["live-read"]) === true) {
       runners.push(async () => {
         const client = buildMoltbookClient(settings);
@@ -445,6 +454,12 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         metadata: { provider: bridge?.provider, model: bridge?.model, reasoningEffort: bridge?.reasoning_effort, enabled: bridge?.enabled === true },
       }));
       runners.push(async () => commandHealthCheck("hermes-gateway", bridge?.binary ?? "hermes", ["gateway", "status"], checkedAt));
+      const runtime = publisherRuntime(parsed.options);
+      runners.push(async () => commandHealthCheck("publisher-python", runtime.python, ["--version"], checkedAt));
+      runners.push(async () => {
+        await checkPublisherFiles(runtime, config);
+        return { name: "publisher-files", status: "PASS", message: "Publisher script and local config paths match the engine; credentials and publication remain unverified", checkedAt: checkedAt.toISOString() };
+      });
     }
     if (booleanOption(parsed.options.autonomous) === true) {
       runners.push(async () => {
@@ -480,7 +495,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
           return { name: "production-tracker-token", status: "FAIL", message: error instanceof Error ? error.message : "Production tracker token is unavailable", checkedAt: checkedAt.toISOString() };
         }
       });
-      runners.push(async () => commandHealthCheck("codex", "codex", ["--version"], checkedAt));
+      runners.push(async () => commandHealthCheck("codex", process.env.MARX_GROWTH_CODEX_BIN ?? "codex", ["--version"], checkedAt));
     }
     if (booleanOption(parsed.options["model-smoke"]) === true) {
       runners.push(async () => {
@@ -509,6 +524,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     if (booleanOption(parsed.options.autonomous) === true && report.status !== "READY") {
       throw new CliExecutionError(`doctor --autonomous is ${report.status}`);
     }
+    if (report.status === "NOT_READY") throw new CliExecutionError("doctor is NOT_READY; resolve the failed checks before running");
     return text;
   }
 
@@ -805,12 +821,14 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       searchLimitPerQuery: numeric(parsed.options["search-limit"], 10, "search-limit", 1),
       sourceTimeoutMs: config.source?.request_timeout_ms ?? 15_000,
       includeAgentQuotes: booleanOption(parsed.options["no-agent-quotes"]) !== true,
+      includeSourceLink: true,
       targetPostIds: typeof parsed.options["post-ids"] === "string" ? parsed.options["post-ids"].split(",").map((value) => value.trim()).filter(Boolean) : undefined,
       persistence,
       orchestratorOptions: {
         runId,
         dryRun: true,
         evaluationMode: evaluationModeOption(parsed.options),
+        modelGenerateComments: evaluationModeOption(parsed.options) === "real_model",
         targetActions: numeric(parsed.options.actions, settings.targetActions, "actions", 0),
         discoveryLimit: numeric(parsed.options.limit, settings.candidateLimit, "limit", 1),
         candidateCount: settings.maxGeneratedCandidatesPerOpportunity,
@@ -829,11 +847,14 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         scoringThreshold: settings.thresholds.minimumOpportunityScore,
         evaluationPolicy: config.thresholds,
         allowedDomains: settings.allowedDomains,
+        ...(evaluationModeOption(parsed.options) === "real_model" ? { ...specificRealModelRuntimeOptions(), enableWorkerAdvisory: false } : {}),
         logger,
       },
     });
     await persistDryRunRecord(result, logger, settings);
+    const reports = typeof parsed.options.output === "string" ? await writeArticleReport(result, parsed.options.output) : undefined;
     const text = JSON.stringify({
+      ...(reports ? { reports } : {}),
       article: { articleId: result.article.articleId, title: result.article.title, sourceUrl: result.article.sourceUrl, evidenceStatus: result.article.evidenceStatus, visibleReplyCount: result.article.visibleReplyCount, replyCount: result.article.replyCount },
       queries: result.queries,
       relatedPosts: result.relatedPosts.map((item) => ({ postId: item.post.postId, url: item.post.url, submolt: item.post.submolt, score: item.score, matchedTerms: item.matchedTerms })),

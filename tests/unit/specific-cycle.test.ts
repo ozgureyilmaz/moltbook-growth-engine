@@ -46,7 +46,7 @@ describe("specific Marx cycle", () => {
       modelReasoningEffort: "low",
       modelWorkingDirectory: "/tmp",
       strategyGenerationBatchSize: 1,
-      strategyGenerationTaskBudget: 8,
+      strategyGenerationTaskBudget: 10,
       strategyGenerationFailureBudget: 2,
     });
   });

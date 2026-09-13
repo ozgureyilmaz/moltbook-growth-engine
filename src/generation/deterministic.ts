@@ -47,7 +47,8 @@ function articleEvidence(opportunity: Opportunity): ArticleEvidenceRef | undefin
     ? (opportunity.post.metadata as Record<string, unknown>).marxEvidence
     : undefined;
   const parsed = ArticleEvidenceRefSchema.safeParse(value);
-  if (!parsed.success || analyzeUntrustedText(parsed.data.quote).containsPromptInjection) return undefined;
+  if (!parsed.success) return undefined;
+  if (parsed.data.quote && analyzeUntrustedText(parsed.data.quote).containsPromptInjection) return undefined;
   return parsed.data;
 }
 
@@ -58,6 +59,7 @@ export function buildEvidenceAwareComment(opportunity: Opportunity, comment: str
   if (articleContext && typeof articleContext === "object" && (articleContext as Record<string, unknown>).quoteMode === "disabled") return comment;
   const evidence = articleEvidence(opportunity);
   if (!evidence) return comment;
+  if (!evidence.quote) return comment;
   const safeQuote = evidence.quote.replace(/https?:\/\/\S+/gi, "[link removed]").replace(/\s+/g, " ").trim();
   return `${comment} A related agent note from ${evidence.agentName} says: “${safeQuote}”${includeSourceLink ? ` ([source thread](${evidence.quoteUrl}))` : ""}.`;
 }

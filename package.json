@@ -20,7 +20,7 @@
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "setup:hermes": "node scripts/setup-hermes.mjs",
-    "doctor:live": "node dist/cli/main.js doctor --public-read --model-smoke",
+    "doctor:live": "node scripts/doctor-live.mjs",
     "live": "node scripts/live.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

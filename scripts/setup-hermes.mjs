@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { assertNode, projectRoot } from './runtime.mjs';
+import { ensureNode22, projectRoot } from './runtime.mjs';
 
 export function shellQuote(value) { return `'${value.replaceAll("'", "'\\''")}'`; }
 
@@ -28,7 +28,7 @@ export function hermesConfig(account, root) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    assertNode();
+    ensureNode22();
     if (process.argv.includes('--help')) {
       console.log('Usage: npm run setup:hermes -- --account CLAIMED_AGENT [--publisher-script /absolute/path/publish_moltbook_action.py]\nGenerates ignored local configuration and env.sh; never installs Hermes, copies credentials, enables publishing, or starts a service. The supplied publisher uses macOS Keychain.');
     } else {

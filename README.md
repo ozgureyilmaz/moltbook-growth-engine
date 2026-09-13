@@ -60,6 +60,19 @@ npm run typecheck
 npm test
 ```
 
+`setup`, `live`, `doctor:live` and `setup:hermes` automatically select an
+installed Node 22 even when your terminal uses Node 24/26. They check
+`MARX_GROWTH_NODE`, installed nvm versions, common Homebrew Node 22 paths, then
+PATH, verifying the actual executable version. The terminal's global default
+is unchanged. If Node 22 is not installed, install it once using the commands
+above. No runtime is downloaded automatically. Direct `npm ci`, tests and build
+commands still require Node 22 in the shell.
+
+The `--article-url` argument also accepts a complete Markdown link copied from
+chat and extracts its validated Marx destination. Conflicting URL labels and
+destinations are rejected. A missing closing shell quote (`dquote>`) happens
+before this application starts: press Ctrl+C and paste the complete command.
+
 `setup` runs `npm ci`, builds the CLI, then performs an isolated fixture smoke
 test. It prints the temporary evidence directory and does not use your existing
 database or inherited production configuration for that rehearsal. The install

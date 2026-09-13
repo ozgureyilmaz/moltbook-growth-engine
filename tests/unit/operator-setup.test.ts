@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { livePlan } from "../../scripts/live.mjs";
-import { assertNode } from "../../scripts/runtime.mjs";
+import { assertNode, findNode22 } from "../../scripts/runtime.mjs";
 import { hermesConfig, shellQuote } from "../../scripts/setup-hermes.mjs";
 import { checkPublisherFiles, publisherRuntime } from "../../src/operations/publisher-runtime";
 import { resolveCodexBinary } from "../../src/models/codex";
@@ -29,6 +29,23 @@ describe("operator entry points", () => {
     expect(plan.run).toContain("--real-model");
     expect(plan.run).toContain("--dry-run");
     expect(plan.run).not.toContain("--publish");
+  });
+  it("accepts copied Markdown links without changing the destination", () => {
+    const plan = livePlan(["--article-url", `[${article}](${article})`]);
+    expect(plan.doctor).toContain(article);
+    expect(plan.run).toContain(article);
+    expect(plan.run).not.toContain(`[${article}](${article})`);
+  });
+  it("rejects deceptive Markdown destinations and malformed feed IDs", () => {
+    for (const input of [`[${article}](https://evil.example/feed/a)`, `[https://marx.finance/feed/different](${article})`, `${article}é`, `[${article}](${article}`, `${article}\n--publish`]) {
+      expect(() => livePlan(["--article-url", input])).toThrow();
+    }
+  });
+  it("selects only a verified Node 22 executable when another major is active", () => {
+    const env = { MARX_GROWTH_NODE: "/team/node22", PATH: "/other/bin" };
+    expect(findNode22({ env, home: "/nonexistent-team-home", execPath: "/current/node", version: "26.8.1", probe: (path: string) => path === "/team/node22" })).toBe("/team/node22");
+    expect(findNode22({ env, home: "/nonexistent-team-home", version: "26.8.1", probe: () => false })).toBeUndefined();
+    expect(findNode22({ env, execPath: "/current/node22", version: "22.17.0", probe: () => { throw new Error("unnecessary probe"); } })).toBe("/current/node22");
   });
   it("requires all production preflights for explicit publication", () => {
     const plan = livePlan(["--article-url", article, "--publish", "--actions", "1"]);

@@ -1,10 +1,10 @@
 import { mkdtempSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertNode, cliPath, projectRoot, runNode, runNpm } from './runtime.mjs';
+import { ensureNode22, cliPath, projectRoot, runNode, runNpm } from './runtime.mjs';
 
 try {
-  assertNode();
+  ensureNode22();
   console.log('Installing locked dependencies with the current Node 22 runtime…');
   runNpm(['ci']);
   runNpm(['run', 'build']);

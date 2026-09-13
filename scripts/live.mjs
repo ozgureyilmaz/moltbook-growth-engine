@@ -1,6 +1,17 @@
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { assertNode, cliPath, runNode } from './runtime.mjs';
+import { ensureNode22, cliPath, runNode } from './runtime.mjs';
+
+export function normalizeArticleUrl(input) {
+  const text = (input ?? '').trim();
+  const markdown = /^\[([^\]\r\n]*)\]\((https:\/\/[^\s()]+)\)$/.exec(text);
+  if (markdown && /^https?:\/\//.test(markdown[1]) && markdown[1] !== markdown[2]) {
+    throw new Error('The Markdown label and destination differ. Paste the plain Marx URL.');
+  }
+  const url = markdown ? markdown[2] : text;
+  if (!/^https:\/\/marx\.finance\/feed\/[A-Za-z0-9_-]+$/.test(url)) throw new Error('Provide --article-url https://marx.finance/feed/FEED_ID');
+  return url;
+}
 
 export function livePlan(argv) {
   const options = new Map();
@@ -20,10 +31,8 @@ export function livePlan(argv) {
     if (!value || value.startsWith('--')) throw new Error(`--${key} requires a value`);
     options.set(key, value);
   }
-  const article = options.get('article-url');
-  if (!article || !/^https:\/\/marx\.finance\/feed\/[A-Za-z0-9_-]+$/.test(article)) {
-    throw new Error('Provide --article-url https://marx.finance/feed/FEED_ID');
-  }
+  const article = normalizeArticleUrl(options.get('article-url'));
+  options.set('article-url', article);
   for (const key of ['limit', 'actions', 'search-limit']) {
     if (options.has(key) && (!/^\d+$/.test(options.get(key)) || !Number.isSafeInteger(Number(options.get(key))) || Number(options.get(key)) < 1)) {
       throw new Error(`--${key} must be a positive integer`);
@@ -48,7 +57,7 @@ export function livePlan(argv) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    assertNode();
+    ensureNode22();
     if (process.argv.includes('--help')) {
       console.log('Usage: npm run live -- --article-url https://marx.finance/feed/FEED_ID [--limit N] [--actions N] [--search-limit N] [--output PATH] [--publish]\nReads live data and uses real models. Publishing requires a separate local production configuration and publisher setup.');
     } else {

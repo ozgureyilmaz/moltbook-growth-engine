@@ -20,13 +20,18 @@ import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 OFFICIAL_ORIGIN = "https://www.moltbook.com"
 API_BASE = f"{OFFICIAL_ORIGIN}/api/v1"
 DEFAULT_CONFIG = Path.home() / ".hermes" / "data" / "moltbook-publisher.json"
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+SAFE_ENV = re.compile(r"^[A-Z][A-Z0-9_]*$")
+DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024
+DEFAULT_MAX_COMMENT_PAGES = 10
+ATTEMPT_STATUSES = {"reserved", "receipt_saved", "imported"}
+RECEIPT_STATUSES = {"PUBLISHED", "FAILED", "VERIFICATION_REQUIRED", "RECONCILIATION_REQUIRED"}
 
 
 class PublisherError(Exception):
@@ -96,21 +101,39 @@ def load_config(path: Path) -> dict[str, Any]:
         raise PublisherError(f"publisher config unavailable: {type(exc).__name__}") from exc
     if not isinstance(value, dict):
         raise PublisherError("publisher config must be an object")
-    required = {"account", "project_dir", "pending_dir", "handoff_dir", "credential_service", "credential_account", "contract_keychain_service", "contract_keychain_account", "contract_key_id"}
+    required = {"account", "project_dir", "pending_dir", "handoff_dir", "contract_key_id"}
     missing = sorted(required - value.keys())
     if missing:
         raise PublisherError(f"publisher config missing: {','.join(missing)}")
     for key in required:
         if not isinstance(value[key], str) or not value[key].strip():
             raise PublisherError(f"publisher config field is invalid: {key}")
-    for key in ("max_actions_per_cycle", "daily_comment_cap", "request_timeout_seconds"):
+    for key in ("max_actions_per_cycle", "daily_comment_cap", "request_timeout_seconds", "max_comment_pages", "max_response_bytes"):
         if key in value and (not isinstance(value[key], int) or value[key] < 1):
             raise PublisherError(f"publisher config field is invalid: {key}")
+    for provider_key in ("secret_provider", "contract_secret_provider"):
+        provider = value.get(provider_key, "macos-keychain")
+        if provider not in ("macos-keychain", "environment"):
+            raise PublisherError(f"publisher config field is invalid: {provider_key}")
+    if value.get("secret_provider", "macos-keychain") == "environment":
+        environment_key = value.get("api_key_environment_variable", "MOLTBOOK_API_KEY")
+        if not isinstance(environment_key, str) or not SAFE_ENV.fullmatch(environment_key):
+            raise PublisherError("publisher api key environment variable is invalid")
+    elif any(key not in value for key in ("credential_service", "credential_account")):
+        raise PublisherError("publisher config is missing Keychain credential reference")
+    if value.get("contract_secret_provider", "macos-keychain") == "environment":
+        environment_key = value.get("contract_secret_environment_variable", "MOLTBOOK_PUBLISHER_CONTRACT_SECRET")
+        if not isinstance(environment_key, str) or not SAFE_ENV.fullmatch(environment_key):
+            raise PublisherError("publisher contract environment variable is invalid")
+    elif any(key not in value for key in ("contract_keychain_service", "contract_keychain_account")):
+        raise PublisherError("publisher config is missing contract Keychain reference")
     cooldown = value.get("comment_cooldown_seconds", 20)
     if not isinstance(cooldown, int) or cooldown < 20:
         raise PublisherError("comment_cooldown_seconds must be at least 20")
     if int(value.get("max_actions_per_cycle", 5)) > int(value.get("daily_comment_cap", 50)):
         raise PublisherError("max_actions_per_cycle exceeds daily_comment_cap")
+    if int(value.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)) < 1024:
+        raise PublisherError("max_response_bytes is too small")
     return value
 
 
@@ -139,13 +162,28 @@ def read_keychain(service: str, account: str) -> str:
     return secret
 
 
-def read_secret(config: dict[str, Any], key: str, environment_key: str, service_key: str, account_key: str) -> str:
-    if config.get("secret_provider") == "environment":
+def read_secret(
+    config: dict[str, Any],
+    key: str,
+    environment_key: str,
+    service_key: str,
+    account_key: str,
+    provider_key: str = "secret_provider",
+) -> str:
+    provider = config.get(provider_key, "macos-keychain")
+    if provider == "environment":
         value = os.environ.get(environment_key, "").strip()
         if not value:
             raise PublisherError(f"publisher environment secret unavailable: {environment_key}")
         return value
-    return read_keychain(str(config[service_key]), str(config[account_key]))
+    if provider != "macos-keychain":
+        raise PublisherError(f"publisher secret provider is unsupported: {provider_key}")
+    try:
+        service = str(config[service_key])
+        account = str(config[account_key])
+    except KeyError as exc:
+        raise PublisherError(f"publisher Keychain reference is missing: {key}") from exc
+    return read_keychain(service, account)
 
 
 def is_official_post_url(value: str, post_id: str) -> bool:
@@ -241,12 +279,18 @@ def make_grant(action_id: str, account: str, now: datetime, key_id: str, secret:
     return grant
 
 
-def run_engine(project: Path, args: list[str], timeout: int) -> dict[str, Any]:
+def run_engine(project: Path, args: list[str], timeout: int, config: dict[str, Any] | None = None) -> dict[str, Any]:
     node = os.environ.get("MARX_GROWTH_NODE", "node")
     cli = project / "dist" / "cli" / "main.js"
     if not cli.is_file():
         raise PublisherError("engine build is missing dist/cli/main.js")
-    env = {key: os.environ[key] for key in ("PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "MARX_GROWTH_CONFIG_DIR", "MARX_GROWTH_DB", "MARX_TRACKER_API_TOKEN", "MOLTBOOK_API_KEY", "MOLTBOOK_PUBLISHER_CONTRACT_SECRET") if key in os.environ}
+    configured_environment_keys = {
+        str(config.get("api_key_environment_variable", "MOLTBOOK_API_KEY")) if config else "MOLTBOOK_API_KEY",
+        str(config.get("contract_secret_environment_variable", "MOLTBOOK_PUBLISHER_CONTRACT_SECRET")) if config else "MOLTBOOK_PUBLISHER_CONTRACT_SECRET",
+    }
+    baseline_environment_keys = {"PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "MARX_GROWTH_CONFIG_DIR", "MARX_GROWTH_DB", "MARX_TRACKER_API_TOKEN"}
+    environment_keys = baseline_environment_keys | configured_environment_keys
+    env = {key: os.environ[key] for key in environment_keys if key in os.environ}
     env["PATH"] = ":".join([str(Path(node).parent), os.environ.get("PATH", "/usr/bin:/bin")])
     try:
         result = subprocess.run([node, str(cli), *args], cwd=project, env=env, check=True, capture_output=True, text=True, timeout=timeout)
@@ -261,7 +305,14 @@ def run_engine(project: Path, args: list[str], timeout: int) -> dict[str, Any]:
     return value
 
 
-def http_json(url: str, method: str, api_key: str, body: dict[str, Any] | None, timeout: int) -> dict[str, Any]:
+def http_json(
+    url: str,
+    method: str,
+    api_key: str,
+    body: dict[str, Any] | None,
+    timeout: int,
+    max_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https" or parsed.netloc != "www.moltbook.com" or not parsed.path.startswith("/api/v1/"):
         raise PublisherError("refusing non-official Moltbook URL")
@@ -272,7 +323,9 @@ def http_json(url: str, method: str, api_key: str, body: dict[str, Any] | None, 
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.build_opener(NoRedirect).open(request, timeout=timeout) as response:
-            raw = response.read()
+            raw = response.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise PublisherError("Moltbook provider response exceeded the configured size limit")
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, PublisherError) as exc:
         raise PublisherError(f"Moltbook provider request failed: {type(exc).__name__}") from exc
     try:
@@ -284,44 +337,129 @@ def http_json(url: str, method: str, api_key: str, body: dict[str, Any] | None, 
     return value
 
 
-def flatten_comments(comments: list[Any]) -> list[dict[str, Any]]:
+def flatten_comments(comments: list[Any], max_nodes: int = 10000) -> list[dict[str, Any]]:
+    """Flatten provider replies without allowing attacker-controlled recursion."""
     result: list[dict[str, Any]] = []
-    for item in comments:
+    stack: list[tuple[Any, int]] = [(item, 0) for item in reversed(comments)]
+    while stack:
+        item, depth = stack.pop()
         if not isinstance(item, dict):
             continue
+        if len(result) >= max_nodes:
+            raise PublisherError("Moltbook comment history exceeded the bounded read limit")
         result.append(item)
         nested = item.get("replies")
         if isinstance(nested, list):
-            result.extend(flatten_comments(nested))
+            if depth >= 100:
+                raise PublisherError("Moltbook comment nesting exceeded the bounded read limit")
+            stack.extend((child, depth + 1) for child in reversed(nested))
     return result
 
 
-def exact_readback(post_id: str, comment_text: str, publisher_account: str, api_key: str, timeout: int) -> str | None:
-    readback = http_json(f"{API_BASE}/posts/{urllib.parse.quote(post_id, safe='')}/comments?sort=new&limit=100", "GET", api_key, None, timeout)
-    comments = readback.get("comments")
-    if not isinstance(comments, list):
-        raise PublisherError("Moltbook readback did not contain comments")
-    for item in flatten_comments(comments):
-        if item.get("content") != comment_text:
-            continue
-        author = item.get("author")
-        author_name = author.get("name") if isinstance(author, dict) else None
-        if author_name != publisher_account:
-            raise PublisherError("exact content exists under a different publisher account")
-        if isinstance(item.get("id"), str) and item["id"]:
-            return item["id"]
-        raise PublisherError("exact publisher comment has no provider id")
-    return None
+def _pagination_details(readback: dict[str, Any]) -> tuple[bool, str | None, str | None]:
+    metadata = readback.get("pagination")
+    if metadata is None:
+        metadata = readback.get("meta")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise PublisherError("Moltbook readback pagination metadata is invalid")
+    details = metadata if isinstance(metadata, dict) else readback
+    has_more_value: Any = None
+    for key in ("has_more", "hasMore", "more"):
+        if key in details:
+            has_more_value = details[key]
+            break
+    next_cursor: str | None = None
+    for key in ("next_cursor", "nextCursor", "cursor"):
+        value = details.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value:
+                raise PublisherError("Moltbook readback pagination cursor is invalid")
+            next_cursor = value
+            break
+    next_url: str | None = None
+    for key in ("next", "next_url", "nextUrl"):
+        value = details.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value:
+                raise PublisherError("Moltbook readback pagination URL is invalid")
+            next_url = value
+            break
+    if has_more_value is None:
+        # A full page without metadata is ambiguous. Never assume it was the
+        # complete history because that could hide an existing exact comment.
+        return False, next_cursor, next_url
+    if not isinstance(has_more_value, bool):
+        raise PublisherError("Moltbook readback pagination has_more is invalid")
+    if has_more_value and not (next_cursor or next_url):
+        raise PublisherError("Moltbook readback is partial without a continuation")
+    return has_more_value, next_cursor, next_url
 
 
-def readback_after_publish(post_id: str, comment_text: str, publisher_account: str, api_key: str, timeout: int) -> str | None:
+def exact_readback(
+    post_id: str,
+    comment_text: str,
+    publisher_account: str,
+    api_key: str,
+    timeout: int,
+    max_pages: int = DEFAULT_MAX_COMMENT_PAGES,
+) -> str | None:
+    if max_pages < 1:
+        raise PublisherError("Moltbook readback page bound is invalid")
+    base_url = f"{API_BASE}/posts/{urllib.parse.quote(post_id, safe='')}/comments?sort=new&limit=100"
+    url = base_url
+    visited: set[str] = set()
+    for page_number in range(max_pages):
+        if url in visited:
+            raise PublisherError("Moltbook readback pagination repeated a page")
+        visited.add(url)
+        readback = http_json(url, "GET", api_key, None, timeout)
+        comments = readback.get("comments")
+        if not isinstance(comments, list):
+            raise PublisherError("Moltbook readback did not contain comments")
+        for item in flatten_comments(comments):
+            if item.get("content") != comment_text:
+                continue
+            author = item.get("author")
+            author_name = author.get("name") if isinstance(author, dict) else None
+            if author_name != publisher_account:
+                raise PublisherError("exact content exists under a different publisher account")
+            if isinstance(item.get("id"), str) and item["id"]:
+                return item["id"]
+            raise PublisherError("exact publisher comment has no provider id")
+        has_more, next_cursor, next_url = _pagination_details(readback)
+        if not has_more:
+            # If the provider omitted pagination metadata, a full page is
+            # ambiguous and must not be treated as a complete prewrite read.
+            if "pagination" not in readback and "meta" not in readback and len(comments) >= 100:
+                raise PublisherError("Moltbook readback may be partial; pagination metadata is missing")
+            return None
+        if page_number + 1 >= max_pages:
+            raise PublisherError("Moltbook readback exceeded the bounded page limit")
+        if next_url:
+            parsed = urllib.parse.urlparse(next_url)
+            if parsed.scheme != "https" or parsed.netloc != "www.moltbook.com" or not parsed.path.startswith("/api/v1/"):
+                raise PublisherError("Moltbook readback continuation is not official")
+            url = next_url
+        else:
+            url = f"{base_url}&cursor={urllib.parse.quote(next_cursor or '', safe='')}"
+    raise PublisherError("Moltbook readback exceeded the bounded page limit")
+
+
+def readback_after_publish(
+    post_id: str,
+    comment_text: str,
+    publisher_account: str,
+    api_key: str,
+    timeout: int,
+    max_pages: int = DEFAULT_MAX_COMMENT_PAGES,
+) -> str | None:
     # Moltbook can accept a comment before it becomes visible to the comments GET.
     # Poll briefly, then require reconciliation rather than risking a duplicate POST.
     # Moltbook's comment GET can lag the successful POST by several seconds.
     # Poll for a slightly longer, still bounded window before requiring
     # reconciliation; never issue a second POST for the same action.
     for attempt in range(6):
-        comment_id = exact_readback(post_id, comment_text, publisher_account, api_key, timeout)
+        comment_id = exact_readback(post_id, comment_text, publisher_account, api_key, timeout, max_pages)
         if comment_id:
             return comment_id
         if attempt < 5:
@@ -361,32 +499,61 @@ def make_receipt(request: dict[str, Any], status: str, error_code: str | None, e
     return receipt
 
 
-def publish_one(action: dict[str, Any], request: dict[str, Any], api_key: str, timeout: int, key_id: str, contract_secret: str) -> dict[str, Any]:
+def contains_verification_marker(value: Any) -> bool:
+    """Detect verification challenges wherever a provider nests them."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = re.sub(r"[^a-z]", "", str(key).lower())
+            if normalized in {"verificationrequired", "requiresverification", "captcha", "challenge"} and bool(nested):
+                return True
+            if normalized == "verification" and nested is not None:
+                return True
+            if contains_verification_marker(nested):
+                return True
+    elif isinstance(value, list):
+        return any(contains_verification_marker(item) for item in value)
+    return False
+
+
+def publish_one(
+    action: dict[str, Any],
+    request: dict[str, Any],
+    api_key: str,
+    timeout: int,
+    key_id: str,
+    contract_secret: str,
+    before_post: Callable[[], None] | None = None,
+    max_pages: int = DEFAULT_MAX_COMMENT_PAGES,
+) -> dict[str, Any]:
     post_id = action["target"]["post_id"]
     comment_text = action["content"]["comment"]
     publisher_account = request["publisherAccount"]
     try:
-        existing_comment_id = exact_readback(post_id, comment_text, publisher_account, api_key, timeout)
+        existing_comment_id = exact_readback(post_id, comment_text, publisher_account, api_key, timeout, max_pages)
     except PublisherError as exc:
         return make_receipt(request, "RECONCILIATION_REQUIRED", "PREWRITE_READBACK_FAILED", str(exc), None, None, key_id, contract_secret)
     if existing_comment_id:
         published_at = iso(now_utc())
         permalink = f"{OFFICIAL_ORIGIN}/post/{urllib.parse.quote(post_id, safe='')}#comment-{urllib.parse.quote(existing_comment_id, safe='')}"
         return make_receipt(request, "PUBLISHED", None, None, existing_comment_id, {"publishedAt": published_at, "permalink": permalink}, key_id, contract_secret)
+    # Keep the kill-switch check as the final operation before the POST. The
+    # caller may have waited for cooldown or performed other network reads.
+    if before_post is not None:
+        before_post()
     try:
         response = http_json(f"{API_BASE}/posts/{urllib.parse.quote(post_id, safe='')}/comments", "POST", api_key, {"content": comment_text}, timeout)
     except PublisherError as exc:
         return make_receipt(request, "RECONCILIATION_REQUIRED", "PROVIDER_REQUEST_FAILED", str(exc), None, None, key_id, contract_secret)
     if response.get("success") is not True:
         return make_receipt(request, "RECONCILIATION_REQUIRED", "PROVIDER_REJECTED", "provider did not report success", None, None, key_id, contract_secret)
-    if response.get("verification_required") is True or isinstance(response.get("verification"), dict):
+    if contains_verification_marker(response):
         return make_receipt(request, "VERIFICATION_REQUIRED", "PLATFORM_VERIFICATION_REQUIRED", "provider requested verification", None, None, key_id, contract_secret)
     comment = response.get("comment")
     comment_id = comment.get("id") if isinstance(comment, dict) else None
     if not isinstance(comment_id, str) or not comment_id:
         return make_receipt(request, "RECONCILIATION_REQUIRED", "PROVIDER_COMMENT_ID_MISSING", "provider success did not include a comment id", None, None, key_id, contract_secret)
     try:
-        readback_comment_id = readback_after_publish(post_id, comment_text, publisher_account, api_key, timeout)
+        readback_comment_id = readback_after_publish(post_id, comment_text, publisher_account, api_key, timeout, max_pages)
     except PublisherError as exc:
         return make_receipt(request, "RECONCILIATION_REQUIRED", "READBACK_FAILED", str(exc), None, None, key_id, contract_secret)
     if not readback_comment_id:
@@ -407,8 +574,135 @@ def atomic_write(path: Path, value: dict[str, Any]) -> None:
         temporary = Path(handle.name)
         json.dump(value, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
+
+
+def read_json_file(path: Path, max_bytes: int = DEFAULT_MAX_RESPONSE_BYTES) -> Any:
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(max_bytes + 1)
+    except OSError as exc:
+        raise PublisherError(f"publisher file unavailable: {type(exc).__name__}") from exc
+    if len(raw) > max_bytes:
+        raise PublisherError("publisher file exceeded the configured size limit")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PublisherError(f"publisher file is malformed: {type(exc).__name__}") from exc
+
+
+def _state_today(state: dict[str, Any], today: str) -> tuple[int, int, str | None]:
+    if state.get("date") != today:
+        return 0, 0, None
+    attempts = int(state.get("attempts", state.get("published", 0)))
+    published = int(state.get("published", 0))
+    if published > attempts:
+        raise PublisherError("publisher state has more publications than attempts")
+    last_attempt_at = state.get("lastAttemptAt")
+    if last_attempt_at is not None:
+        if not isinstance(last_attempt_at, str):
+            raise PublisherError("publisher state lastAttemptAt is invalid")
+        try:
+            parse_time(last_attempt_at)
+        except ValueError as exc:
+            raise PublisherError("publisher state lastAttemptAt is invalid") from exc
+    return attempts, published, last_attempt_at
+
+
+def validate_attempt(value: Any, action_id: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise PublisherError("publisher attempt is not an object")
+    if value.get("schemaVersion") != "1.0" or value.get("actionId") != action_id:
+        raise PublisherError("publisher attempt is not bound to the selected action")
+    status = value.get("status")
+    if status not in ATTEMPT_STATUSES:
+        raise PublisherError("publisher attempt status is invalid")
+    for key in ("reservedAt",):
+        if not isinstance(value.get(key), str):
+            raise PublisherError("publisher attempt timestamp is invalid")
+        try:
+            parse_time(value[key])
+        except ValueError as exc:
+            raise PublisherError("publisher attempt timestamp is invalid") from exc
+    request_id = value.get("requestId")
+    if not isinstance(request_id, str) or not SAFE_ID.fullmatch(request_id):
+        raise PublisherError("publisher attempt request ID is invalid")
+    if status in {"receipt_saved", "imported"}:
+        if not isinstance(value.get("receiptId"), str) or not SAFE_ID.fullmatch(value["receiptId"]):
+            raise PublisherError("publisher attempt receipt ID is invalid")
+        if value.get("receiptStatus") not in RECEIPT_STATUSES:
+            raise PublisherError("publisher attempt receipt status is invalid")
+    if status == "imported" and not isinstance(value.get("importedAt"), str):
+        raise PublisherError("publisher attempt importedAt is invalid")
+    return value
+
+
+def load_attempt(path: Path, action_id: str, max_bytes: int = DEFAULT_MAX_RESPONSE_BYTES) -> dict[str, Any] | None:
+    try:
+        value = read_json_file(path, max_bytes)
+    except PublisherError as exc:
+        if not path.exists():
+            return None
+        raise PublisherError(f"publisher attempt is corrupt for {action_id}: {exc}") from exc
+    return validate_attempt(value, action_id)
+
+
+def validate_receipt_for_request(receipt: Any, request: dict[str, Any], key_id: str, secret: str) -> dict[str, Any]:
+    if not isinstance(receipt, dict):
+        raise PublisherError("publisher receipt is not an object")
+    if receipt.get("schemaVersion") != "1.0" or receipt.get("messageType") != "MOLTBOOK_PUBLICATION_RECEIPT":
+        raise PublisherError("publisher receipt envelope is invalid")
+    if receipt.get("status") not in RECEIPT_STATUSES:
+        raise PublisherError("publisher receipt status is invalid")
+    for key in ("requestId", "requestHash", "actionId", "actionHash", "idempotencyKey", "contentHash", "bodyHash", "targetHash", "publisherAccount", "targetPostId"):
+        if receipt.get(key) != request.get(key) and key not in {"targetPostId", "publisherAccount"}:
+            raise PublisherError("publisher receipt is not bound to its request")
+    if receipt.get("publisherAccount") != request.get("publisherAccount"):
+        raise PublisherError("publisher receipt publisher account does not match its request")
+    target = request.get("action", {}).get("target") if isinstance(request.get("action"), dict) else None
+    if not isinstance(target, dict) or receipt.get("targetPostId") != target.get("post_id"):
+        raise PublisherError("publisher receipt target post does not match its request")
+    verify_contract_signature(receipt, key_id, secret, "receipt")
+    unsigned_hash = dict(receipt)
+    receipt_hash = unsigned_hash.pop("receiptHash", None)
+    if not isinstance(receipt_hash, str) or receipt_hash != sha256_text(stable_json(unsigned_hash)):
+        raise PublisherError("publisher receipt hash is invalid")
+    if receipt["status"] == "PUBLISHED":
+        if receipt.get("evidenceStatus") != "verified" or not all(isinstance(receipt.get(key), str) and receipt[key] for key in ("providerCommentId", "publishedAt", "permalink")):
+            raise PublisherError("PUBLISHED receipt does not contain verified evidence")
+        permalink = urllib.parse.urlparse(receipt["permalink"])
+        if permalink.scheme != "https" or permalink.netloc != "www.moltbook.com":
+            raise PublisherError("publisher receipt permalink is not official")
+    elif not isinstance(receipt.get("errorCode"), str) or not receipt["errorCode"]:
+        raise PublisherError("non-published receipt is missing an error code")
+    return receipt
+
+
+def load_request(path: Path, config: dict[str, Any], secret: str, max_bytes: int = DEFAULT_MAX_RESPONSE_BYTES) -> tuple[dict[str, Any], dict[str, Any]]:
+    value = read_json_file(path, max_bytes)
+    if not isinstance(value, dict):
+        raise PublisherError("prepared request is invalid")
+    action = verify_request(value, config, now_utc(), secret)
+    return value, action
+
+
+def strict_claimed_identity(api_key: str, account: str, timeout: int) -> None:
+    status = http_json(f"{API_BASE}/agents/status", "GET", api_key, None, timeout)
+    if status.get("status") != "claimed":
+        raise PublisherError("Moltbook publisher agent is not claimed")
+    identity = http_json(f"{API_BASE}/agents/me", "GET", api_key, None, timeout)
+    agent = identity.get("agent")
+    if not isinstance(agent, dict) or agent.get("name") != account or agent.get("is_claimed") is not True:
+        raise PublisherError("Moltbook /agents/me identity is not claimed or does not match configured account")
+
+
+def assert_kill_cleared(project: Path, timeout: int, config: dict[str, Any]) -> None:
+    kill_status = run_engine(project, ["ops", "kill-status"], timeout, config)
+    if not isinstance(kill_status, dict) or kill_status.get("status") != "CLEARED":
+        raise PublisherError("publisher-side kill switch is engaged")
 
 
 def quarantine_pending(path: Path, reason: str) -> None:
@@ -433,93 +727,309 @@ def publisher_lock(path: Path):
     return handle
 
 
+def requested_action_ids(action_ids: set[str] | None) -> list[str]:
+    if not action_ids:
+        raise PublisherError("real publisher runs require one or more explicit --action-id values")
+    selected = sorted(action_ids)
+    if any(not isinstance(action_id, str) or not SAFE_ID.fullmatch(action_id) for action_id in selected):
+        raise PublisherError("requested action ID is invalid")
+    return selected
+
+
+def collect_pending(
+    pending: Path,
+    config: dict[str, Any],
+    selected: set[str] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read pending entries without changing the directory.
+
+    The second return value contains read errors only for validate-only mode;
+    production treats selected read errors as a blocking condition.
+    """
+    if not pending.exists():
+        if selected:
+            raise PublisherError("selected pending action directory is missing")
+        return [], []
+    if not pending.is_dir():
+        raise PublisherError("configured pending path is not a directory")
+    max_bytes = int(config.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES))
+    entries: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for path in sorted(pending.glob("*.json")):
+        try:
+            raw = read_json_file(path, max_bytes)
+        except PublisherError as exc:
+            if selected is not None and path.stem in selected:
+                raise
+            errors.append({"path": str(path), "status": "INVALID", "error": str(exc)})
+            continue
+        if not isinstance(raw, dict):
+            if selected is None:
+                errors.append({"path": str(path), "status": "INVALID", "error": "pending action is not an object"})
+            elif path.stem in selected:
+                raise PublisherError("selected pending action is not an object")
+            continue
+        action_id = raw.get("action_id")
+        if selected is not None:
+            if action_id in selected or path.stem in selected:
+                entries.append({"path": path, "transport": raw})
+        elif raw.get("action") == "COMMENT":
+            entries.append({"path": path, "transport": raw})
+    if selected is not None:
+        by_id: dict[str, list[dict[str, Any]]] = {action_id: [] for action_id in selected}
+        for entry in entries:
+            action_id = entry["transport"].get("action_id")
+            if action_id in by_id:
+                by_id[action_id].append(entry)
+            elif entry["path"].stem in by_id:
+                by_id[entry["path"].stem].append(entry)
+        duplicate = next((action_id for action_id, matches in by_id.items() if len(matches) > 1), None)
+        if duplicate:
+            raise PublisherError(f"selected action ID has multiple pending files: {duplicate}")
+        missing = [action_id for action_id, matches in by_id.items() if not matches]
+        if missing:
+            raise PublisherError(f"selected action IDs are not present: {','.join(missing)}")
+        entries = [by_id[action_id][0] for action_id in sorted(by_id)]
+    return entries, errors
+
+
+def validate_pending(config: dict[str, Any], action_ids: set[str] | None) -> list[dict[str, Any]]:
+    project = Path(config["project_dir"]).expanduser().resolve()
+    pending = ensure_under(Path(config["pending_dir"]), project)
+    selected = None if action_ids is None else set(requested_action_ids(action_ids))
+    entries, errors = collect_pending(pending, config, selected)
+    results = list(errors)
+    for entry in entries:
+        transport = entry["transport"]
+        try:
+            validate_action(transport, config)
+            results.append({"actionId": transport.get("action_id"), "status": "VALID"})
+        except PublisherError as exc:
+            results.append({"actionId": transport.get("action_id"), "status": "INVALID", "error": str(exc)})
+    return results
+
+
+def wait_for_cooldown(state: dict[str, Any], today: str, cooldown: int) -> None:
+    if state.get("date") != today or not state.get("lastAttemptAt"):
+        return
+    try:
+        elapsed = (now_utc() - parse_time(str(state["lastAttemptAt"]))).total_seconds()
+    except ValueError as exc:
+        raise PublisherError("publisher state lastAttemptAt is invalid") from exc
+    if elapsed < 0:
+        raise PublisherError("publisher state lastAttemptAt is in the future")
+    if elapsed < cooldown:
+        time.sleep(cooldown - elapsed)
+
+
+def reserve_attempt(
+    attempt_path: Path,
+    state_path: Path,
+    state: dict[str, Any],
+    action_id: str,
+    request: dict[str, Any],
+    today: str,
+) -> dict[str, Any]:
+    reserved_at = iso(now_utc())
+    next_state = dict(state)
+    if next_state.get("date") != today:
+        next_state = {"date": today, "attempts": 0, "published": 0}
+    next_state["attempts"] = int(next_state.get("attempts", 0)) + 1
+    next_state["published"] = int(next_state.get("published", 0))
+    next_state["lastAttemptAt"] = reserved_at
+    # Count the attempt before creating any provider request. If either write
+    # fails, no POST is reached and the cap remains conservative.
+    atomic_write(state_path, next_state)
+    attempt = {
+        "schemaVersion": "1.0",
+        "actionId": action_id,
+        "requestId": request["requestId"],
+        "requestHash": request["requestHash"],
+        "status": "reserved",
+        "reservedAt": reserved_at,
+        "updatedAt": reserved_at,
+    }
+    atomic_write(attempt_path, attempt)
+    state.clear()
+    state.update(next_state)
+    return attempt
+
+
+def persist_and_import_receipt(
+    project: Path,
+    config: dict[str, Any],
+    requests: Path,
+    receipts: Path,
+    attempt_path: Path,
+    attempt: dict[str, Any],
+    request: dict[str, Any],
+    receipt: dict[str, Any],
+    state_path: Path,
+    state: dict[str, Any],
+    today: str,
+    contract_key_id: str,
+    contract_secret: str,
+) -> dict[str, Any]:
+    request_id = request["requestId"]
+    receipt_path = receipts / f"{request_id}.json"
+    if receipt_path.exists():
+        existing = read_json_file(receipt_path, int(config.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)))
+        if not isinstance(existing, dict):
+            raise PublisherError("existing publisher receipt is invalid")
+        receipt = validate_receipt_for_request(existing, request, contract_key_id, contract_secret)
+    else:
+        validate_receipt_for_request(receipt, request, contract_key_id, contract_secret)
+        atomic_write(receipt_path, receipt)
+    saved = dict(attempt)
+    saved.update({"status": "receipt_saved", "receiptId": receipt["receiptId"], "receiptStatus": receipt["status"], "updatedAt": iso(now_utc())})
+    atomic_write(attempt_path, saved)
+    imported = run_engine(project, ["handoff", "import-receipt", request_id, "--receipt", str(receipt_path)], int(config.get("request_timeout_seconds", 30)), config)
+    disposition = imported.get("disposition") if isinstance(imported, dict) else None
+    if not isinstance(disposition, str) or not disposition:
+        raise PublisherError("engine receipt import returned no disposition")
+    imported_attempt = dict(saved)
+    imported_attempt.update({"status": "imported", "importedAt": iso(now_utc()), "importedDisposition": disposition, "updatedAt": iso(now_utc())})
+    atomic_write(attempt_path, imported_attempt)
+    if receipt["status"] == "PUBLISHED":
+        next_state = dict(state)
+        next_state["published"] = int(next_state.get("published", 0)) + 1
+        atomic_write(state_path, next_state)
+        state.clear()
+        state.update(next_state)
+    return {"actionId": request["actionId"], "status": receipt["status"], "receiptId": receipt["receiptId"], "imported": disposition}
+
+
+def recover_existing_attempt(
+    project: Path,
+    config: dict[str, Any],
+    entry: dict[str, Any],
+    attempt: dict[str, Any],
+    requests: Path,
+    receipts: Path,
+    attempt_path: Path,
+    state_path: Path,
+    state: dict[str, Any],
+    today: str,
+    contract_key_id: str,
+    contract_secret: str,
+) -> dict[str, Any]:
+    request_id = attempt["requestId"]
+    request_path = requests / f"{request_id}.json"
+    if not request_path.is_file():
+        raise PublisherError("reserved publisher attempt is ambiguous because its request is missing")
+    request, action = load_request(request_path, config, contract_secret, int(config.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)))
+    if action.get("action_id") != entry["transport"].get("action_id"):
+        raise PublisherError("publisher attempt request is bound to a different pending action")
+    receipt_path = receipts / f"{request_id}.json"
+    if receipt_path.is_file():
+        receipt_value = read_json_file(receipt_path, int(config.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)))
+        receipt = validate_receipt_for_request(receipt_value, request, contract_key_id, contract_secret)
+        if attempt["status"] == "imported":
+            return {"actionId": action["action_id"], "status": receipt["status"], "receiptId": receipt["receiptId"], "imported": attempt.get("importedDisposition", "ACKNOWLEDGE")}
+        return persist_and_import_receipt(project, config, requests, receipts, attempt_path, attempt, request, receipt, state_path, state, today, contract_key_id, contract_secret)
+    if attempt["status"] != "reserved":
+        raise PublisherError("publisher receipt is missing for a non-reserved attempt")
+    api_key = read_secret(config, "MOLTBOOK_API_KEY", str(config.get("api_key_environment_variable", "MOLTBOOK_API_KEY")), "credential_service", "credential_account")
+    try:
+        comment_id = exact_readback(action["target"]["post_id"], action["content"]["comment"], request["publisherAccount"], api_key, int(config.get("request_timeout_seconds", 30)), int(config.get("max_comment_pages", DEFAULT_MAX_COMMENT_PAGES)))
+    except PublisherError:
+        # Keep the reserved record unresolved. In particular, do not turn an
+        # unavailable readback into permission to issue a second POST.
+        raise
+    if comment_id:
+        permalink = f"{OFFICIAL_ORIGIN}/post/{urllib.parse.quote(action['target']['post_id'], safe='')}#comment-{urllib.parse.quote(comment_id, safe='')}"
+        receipt = make_receipt(request, "PUBLISHED", None, None, comment_id, {"publishedAt": iso(now_utc()), "permalink": permalink}, contract_key_id, contract_secret)
+    else:
+        receipt = make_receipt(request, "RECONCILIATION_REQUIRED", "PRIOR_ATTEMPT_UNRESOLVED", "A prior publisher attempt has no exact readback; no POST was retried", None, None, contract_key_id, contract_secret)
+    return persist_and_import_receipt(project, config, requests, receipts, attempt_path, attempt, request, receipt, state_path, state, today, contract_key_id, contract_secret)
+
+
 def process(config: dict[str, Any], validate_only: bool, action_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    if validate_only:
+        return validate_pending(config, action_ids)
+    selected_ids = set(requested_action_ids(action_ids))
     project = Path(config["project_dir"]).expanduser().resolve()
     handoff = ensure_under(Path(config["handoff_dir"]), project)
     lock_path = ensure_under(Path(config.get("lock_path", handoff / "publisher.lock")), handoff)
     lock = publisher_lock(lock_path)
     try:
-        return _process_locked(config, validate_only, project, handoff, action_ids)
+        return _process_locked(config, project, handoff, selected_ids)
     finally:
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         lock.close()
 
 
-def _process_locked(config: dict[str, Any], validate_only: bool, project: Path, handoff: Path, action_ids: set[str] | None = None) -> list[dict[str, Any]]:
+def _process_locked(config: dict[str, Any], project: Path, handoff: Path, action_ids: set[str]) -> list[dict[str, Any]]:
     pending = ensure_under(Path(config["pending_dir"]), project)
     requests = ensure_under(handoff / "requests", handoff)
     receipts = ensure_under(handoff / "receipts", handoff)
-    pending.mkdir(parents=True, exist_ok=True)
-    max_actions = int(config.get("max_actions_per_cycle", 5))
-    daily_cap = int(config.get("daily_comment_cap", 50))
+    attempts = ensure_under(handoff / "attempts", handoff)
     state_path = ensure_under(Path(config.get("state_path", handoff / "publisher-state.json")), handoff)
+    entries, _ = collect_pending(pending, config, action_ids)
+    max_actions = int(config.get("max_actions_per_cycle", 5))
+    if len(entries) > max_actions:
+        raise PublisherError("selected action count exceeds max_actions_per_cycle; no actions were truncated")
+    daily_cap = int(config.get("daily_comment_cap", 50))
     state = load_publish_state(state_path)
     today = now_utc().date().isoformat()
-    published_today = int(state.get("date") == today and state.get("published", 0) or 0)
-    if published_today >= daily_cap:
-        return [{"status": "DAILY_CAP_REACHED", "publishedToday": published_today}]
-    contract_key_id = str(config["contract_key_id"])
-    entries: list[dict[str, Any]] = []
-    for path in sorted(pending.glob("*.json")):
+    attempts_today, _, _ = _state_today(state, today)
+    existing: list[tuple[dict[str, Any], dict[str, Any], Path]] = []
+    new_entries: list[dict[str, Any]] = []
+    for entry in entries:
+        action_id = entry["transport"].get("action_id")
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict) and raw.get("action") == "COMMENT" and (action_ids is None or raw.get("action_id") in action_ids):
-                entries.append({"path": path, "transport": raw})
-        except (OSError, json.JSONDecodeError) as exc:
-            quarantine_pending(path, f"pending action could not be decoded: {type(exc).__name__}")
-            continue
+            validate_action(entry["transport"], config)
+        except PublisherError as exc:
+            raise PublisherError(f"selected action {action_id} is invalid: {exc}") from exc
+        attempt_path = attempts / f"{action_id}.json"
+        attempt = load_attempt(attempt_path, str(action_id), int(config.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)))
+        if attempt is None:
+            new_entries.append(entry)
+        else:
+            existing.append((entry, attempt, attempt_path))
+    if attempts_today + len(new_entries) > daily_cap:
+        raise PublisherError("selected action count exceeds the remaining conservative daily attempt cap; no actions were truncated")
+    contract_key_id = str(config["contract_key_id"])
     results: list[dict[str, Any]] = []
-    last_publish_attempt = 0.0
-    for entry in entries[:min(max_actions, daily_cap - published_today)]:
+    contract_secret: str | None = None
+    for entry, attempt, attempt_path in existing:
+        if contract_secret is None:
+            contract_secret = read_secret(config, "MOLTBOOK_PUBLISHER_CONTRACT_SECRET", str(config.get("contract_secret_environment_variable", "MOLTBOOK_PUBLISHER_CONTRACT_SECRET")), "contract_keychain_service", "contract_keychain_account", "contract_secret_provider")
+        results.append(recover_existing_attempt(project, config, entry, attempt, requests, receipts, attempt_path, state_path, state, today, contract_key_id, contract_secret))
+    for entry in new_entries:
         transport = entry["transport"]
         try:
-            validate_action(transport, config)
-        except PublisherError as exc:
-            quarantine_pending(entry["path"], str(exc))
-            results.append({"actionId": transport.get("action_id"), "status": "QUARANTINED", "error": str(exc)})
-            continue
-        try:
-            if validate_only:
-                results.append({"actionId": transport.get("action_id"), "status": "VALID"})
-                continue
+            if contract_secret is None:
+                contract_secret = read_secret(config, "MOLTBOOK_PUBLISHER_CONTRACT_SECRET", str(config.get("contract_secret_environment_variable", "MOLTBOOK_PUBLISHER_CONTRACT_SECRET")), "contract_keychain_service", "contract_keychain_account", "contract_secret_provider")
             now = now_utc()
-            contract_secret = read_secret(config, "MOLTBOOK_PUBLISHER_CONTRACT_SECRET", str(config.get("contract_secret_environment_variable", "MOLTBOOK_PUBLISHER_CONTRACT_SECRET")), "contract_keychain_service", "contract_keychain_account")
             grant = make_grant(str(transport["action_id"]), str(config["account"]), now, contract_key_id, contract_secret)
             with tempfile.TemporaryDirectory(prefix="moltbook-grant-") as temporary:
                 grant_path = Path(temporary) / "grant.json"
                 atomic_write(grant_path, grant)
-                prepared = run_engine(project, ["handoff", "prepare", str(transport["action_id"]), "--grant", str(grant_path), "--publisher-account", str(config["account"])], int(config.get("request_timeout_seconds", 30)))
-            request_id = prepared.get("request", {}).get("requestId")
+                prepared = run_engine(project, ["handoff", "prepare", str(transport["action_id"]), "--grant", str(grant_path), "--publisher-account", str(config["account"])], int(config.get("request_timeout_seconds", 30)), config)
+            request_id = prepared.get("request", {}).get("requestId") if isinstance(prepared.get("request"), dict) else None
             if not isinstance(request_id, str) or not SAFE_ID.fullmatch(request_id):
                 raise PublisherError("engine did not return a valid requestId")
             request_path = requests / f"{request_id}.json"
-            request = json.loads(request_path.read_text(encoding="utf-8"))
-            if not isinstance(request, dict):
-                raise PublisherError("prepared request is invalid")
-            action = verify_request(request, config, now_utc(), contract_secret)
-            kill_status = run_engine(project, ["ops", "kill-status"], int(config.get("request_timeout_seconds", 30)))
-            if kill_status.get("status") != "CLEARED":
-                raise PublisherError("publisher-side kill switch is engaged")
+            request, action = load_request(request_path, config, contract_secret, int(config.get("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES)))
+            assert_kill_cleared(project, int(config.get("request_timeout_seconds", 30)), config)
             api_key = read_secret(config, "MOLTBOOK_API_KEY", str(config.get("api_key_environment_variable", "MOLTBOOK_API_KEY")), "credential_service", "credential_account")
-            identity = http_json(f"{API_BASE}/agents/status", "GET", api_key, None, int(config.get("request_timeout_seconds", 30)))
-            if identity.get("status") != "claimed":
-                raise PublisherError("Moltbook publisher agent is not claimed")
-            agent = identity.get("agent")
-            if isinstance(agent, dict) and agent.get("name") not in (None, config["account"]):
-                raise PublisherError("Moltbook publisher account does not match claimed agent")
-            elapsed = time.monotonic() - last_publish_attempt
+            strict_claimed_identity(api_key, str(config["account"]), int(config.get("request_timeout_seconds", 30)))
             cooldown = int(config.get("comment_cooldown_seconds", 20))
-            if last_publish_attempt > 0 and elapsed < cooldown:
-                time.sleep(cooldown - elapsed)
-            last_publish_attempt = time.monotonic()
-            receipt = publish_one(action, request, api_key, int(config.get("request_timeout_seconds", 30)), contract_key_id, contract_secret)
-            receipt_path = receipts / f"{request_id}.json"
-            atomic_write(receipt_path, receipt)
-            imported = run_engine(project, ["handoff", "import-receipt", request_id, "--receipt", str(receipt_path)], int(config.get("request_timeout_seconds", 30)))
-            if receipt["status"] == "PUBLISHED":
-                published_today += 1
-                atomic_write(state_path, {"date": today, "published": published_today})
-            results.append({"actionId": action["action_id"], "status": receipt["status"], "receiptId": receipt["receiptId"], "imported": imported.get("disposition")})
+            wait_for_cooldown(state, today, cooldown)
+            attempt_path = attempts / f"{action['action_id']}.json"
+            attempt = reserve_attempt(attempt_path, state_path, state, action["action_id"], request, today)
+            receipt = publish_one(
+                action,
+                request,
+                api_key,
+                int(config.get("request_timeout_seconds", 30)),
+                contract_key_id,
+                contract_secret,
+                before_post=lambda: assert_kill_cleared(project, int(config.get("request_timeout_seconds", 30)), config),
+                max_pages=int(config.get("max_comment_pages", DEFAULT_MAX_COMMENT_PAGES)),
+            )
+            results.append(persist_and_import_receipt(project, config, requests, receipts, attempt_path, attempt, request, receipt, state_path, state, today, contract_key_id, contract_secret))
         except (PublisherError, KeyError, TypeError, ValueError) as exc:
             results.append({"actionId": transport.get("action_id"), "status": "ERROR", "error": str(exc)})
     return results
@@ -532,8 +1042,24 @@ def load_publish_state(path: Path) -> dict[str, Any]:
         return {}
     except (OSError, json.JSONDecodeError) as exc:
         raise PublisherError(f"publisher state unavailable: {type(exc).__name__}") from exc
-    if not isinstance(value, dict) or not isinstance(value.get("date", ""), str) or not isinstance(value.get("published", 0), int) or value.get("published", 0) < 0:
+    if not isinstance(value, dict) or not isinstance(value.get("date", ""), str):
         raise PublisherError("publisher state is invalid")
+    for key in ("attempts", "published"):
+        if key in value and (not isinstance(value[key], int) or value[key] < 0):
+            raise PublisherError("publisher state is invalid")
+    attempts = int(value.get("attempts", value.get("published", 0)))
+    published = int(value.get("published", 0))
+    if published > attempts:
+        raise PublisherError("publisher state has more publications than attempts")
+    value["attempts"] = attempts
+    value["published"] = published
+    if value.get("lastAttemptAt") is not None:
+        if not isinstance(value["lastAttemptAt"], str):
+            raise PublisherError("publisher state lastAttemptAt is invalid")
+        try:
+            parse_time(value["lastAttemptAt"])
+        except ValueError as exc:
+            raise PublisherError("publisher state lastAttemptAt is invalid") from exc
     return value
 
 
@@ -548,18 +1074,13 @@ def main() -> int:
         config = load_config(args.config)
         if args.check:
             api_key = read_secret(config, "MOLTBOOK_API_KEY", str(config.get("api_key_environment_variable", "MOLTBOOK_API_KEY")), "credential_service", "credential_account")
-            identity = http_json(f"{API_BASE}/agents/me", "GET", api_key, None, int(config.get("request_timeout_seconds", 30)))
-            agent = identity.get("agent") if isinstance(identity.get("agent"), dict) else identity
-            if not isinstance(agent, dict) or agent.get("name") != config["account"] or agent.get("is_claimed") is not True:
-                raise PublisherError("Moltbook /agents/me identity is not claimed or does not match configured account")
+            strict_claimed_identity(api_key, str(config["account"]), int(config.get("request_timeout_seconds", 30)))
             print(json.dumps({"status": "READY", "account": config["account"]}, separators=(",", ":")))
             return 0
-        if not args.validate_only and not args.action_id:
-            raise PublisherError("real publisher runs require one or more explicit --action-id values")
         results = process(config, args.validate_only, set(args.action_id) if args.action_id else None)
-        if results:
-            print(json.dumps({"status": "OK", "results": results}, ensure_ascii=False, separators=(",", ":")))
-        return 0
+        failed = any(result.get("status") not in {"PUBLISHED", "VALID"} for result in results)
+        print(json.dumps({"status": "ERROR" if failed else "OK", "results": results}, ensure_ascii=False, separators=(",", ":")))
+        return 1 if failed else 0
     except PublisherError as exc:
         print(json.dumps({"status": "ERROR", "error": str(exc)}, ensure_ascii=False, separators=(",", ":")))
         return 1

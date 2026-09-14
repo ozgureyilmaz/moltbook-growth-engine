@@ -164,7 +164,8 @@ Run an explicit one-shot publication, starting with a one-action pilot:
 ```bash
 npm run publish -- \
   --article-url "https://marx.finance/feed/FEED_ID" \
-  --actions 1
+  --actions 1 \
+  --with-agent-quotes
 ```
 
 **Use `npm run publish`, not `npm publish`.** The latter is npm's package-release
@@ -176,7 +177,10 @@ re-engages the kill switch on completion or handled failure. No model rewrites
 an approved comment at the publisher boundary. Existing pending actions or
 unresolved attempts block a new run until an operator reconciles them.
 
-The default pilot requests one action. After a verified pilot, increase to
+The default pilot requests one action and the example enables a complete,
+source-grounded Marx agent quote when one is available. If no complete quote is
+available, the candidate is generated without a fragment rather than inventing
+or clipping evidence. After a verified pilot, increase to
 `--actions 5` if appropriate. The existing workflow requires the complete
 requested batch before handoff; if fewer candidates qualify, it publishes none.
 The bundled publisher receives only the action IDs from this run, never an

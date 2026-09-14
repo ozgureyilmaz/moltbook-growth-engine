@@ -15,7 +15,8 @@ export function normalizeArticleUrl(input) {
 
 export function livePlan(argv) {
   const options = new Map();
-  const allowed = new Set(['article-url', 'limit', 'actions', 'search-limit', 'output']);
+  const allowed = new Set(['article-url', 'limit', 'actions', 'search-limit', 'output', 'with-agent-quotes', 'no-agent-quotes']);
+  const booleanFlags = new Set(['with-agent-quotes', 'no-agent-quotes']);
   let publish = false;
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--publish') {
@@ -27,8 +28,13 @@ export function livePlan(argv) {
     if (!match || !allowed.has(match[1])) throw new Error(`Unsupported option: ${argv[i]}`);
     const key = match[1];
     if (options.has(key)) throw new Error(`Duplicate --${key}`);
+    if (booleanFlags.has(key) && match[2] === undefined && (!argv[i + 1] || argv[i + 1].startsWith('--'))) {
+      options.set(key, 'true');
+      continue;
+    }
     const value = match[2] ?? argv[++i];
     if (!value || value.startsWith('--')) throw new Error(`--${key} requires a value`);
+    if (booleanFlags.has(key) && value !== 'true' && value !== 'false') throw new Error(`--${key} must be true or false`);
     options.set(key, value);
   }
   const article = normalizeArticleUrl(options.get('article-url'));
@@ -42,8 +48,9 @@ export function livePlan(argv) {
   if (!options.has('actions')) options.set('actions', '5');
   if (!options.has('search-limit')) options.set('search-limit', '10');
   if (!options.has('output')) options.set('output', 'reports/');
+  if (options.get('with-agent-quotes') === 'true' && options.get('no-agent-quotes') === 'true') throw new Error('Choose either --with-agent-quotes or --no-agent-quotes');
   if (!options.get('output').endsWith('.md') && !options.get('output').endsWith('/')) options.set('output', `${options.get('output')}/`);
-  const values = [...options].flatMap(([key, value]) => [`--${key}`, value]);
+  const values = [...options].flatMap(([key, value]) => booleanFlags.has(key) ? (value === 'true' ? [`--${key}`] : []) : [`--${key}`, value]);
   const doctor = ['doctor', '--public-read', '--article-url', article, '--model-smoke'];
   if (publish) doctor.push('--live-read', '--autonomous', '--publisher');
   return {
@@ -51,7 +58,7 @@ export function livePlan(argv) {
     doctor,
     run: publish
       ? ['marx-specific-cycle', ...values, '--real-model', '--publish']
-      : ['article-run', ...values, '--dry-run', '--real-model', '--no-agent-quotes'],
+      : ['article-run', ...values, '--dry-run', '--real-model', ...(options.get('with-agent-quotes') === 'true' ? ['--with-agent-quotes'] : ['--no-agent-quotes'])],
   };
 }
 

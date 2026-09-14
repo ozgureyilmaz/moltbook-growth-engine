@@ -57,6 +57,11 @@ describe("operator entry points", () => {
     expect(livePlan(["--article-url", article, "--publish", "--output", "team reports"]).run).toContain("team reports/");
     expect(livePlan(["--article-url", article, "--output", "team reports/review.md"]).run).toContain("team reports/review.md");
   });
+  it("forwards verified Marx agent quote mode to publication", () => {
+    const plan = livePlan(["--article-url", article, "--publish", "--with-agent-quotes"]);
+    expect(plan.run).toContain("--with-agent-quotes");
+    expect(plan.run).not.toContain("--no-agent-quotes");
+  });
   it.each([
     ["--real-model=false"], ["--dry-run=false"], ["--fixture", "x"], ["--publish=false"],
     ["--actions", "0"], ["--actions", "1.5"], ["--actions", "2", "--actions", "3"],

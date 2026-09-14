@@ -61,6 +61,11 @@ describe("operator entry points", () => {
     const plan = livePlan(["--article-url", article, "--publish", "--with-agent-quotes"]);
     expect(plan.run).toContain("--with-agent-quotes");
     expect(plan.run).not.toContain("--no-agent-quotes");
+    expect(plan.run.filter((arg) => arg === "--with-agent-quotes")).toHaveLength(1);
+    const draft = livePlan(["--article-url", article, "--no-agent-quotes=false"]);
+    expect(draft.run).toContain("--with-agent-quotes");
+    expect(draft.run).not.toContain("--no-agent-quotes");
+    expect(() => livePlan(["--article-url", article, "--with-agent-quotes=false", "--no-agent-quotes=false"])).toThrow("Choose either");
   });
   it.each([
     ["--real-model=false"], ["--dry-run=false"], ["--fixture", "x"], ["--publish=false"],

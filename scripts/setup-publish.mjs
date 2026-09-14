@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync } from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { lstat, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ensureNode22, projectRoot } from './runtime.mjs';
@@ -44,6 +44,29 @@ async function readOptional(path, fallback = '{}\n') {
   return readFile(path, 'utf8');
 }
 
+async function assertFreshPublishDirectory(project) {
+  const localDirectory = join(project, '.local');
+  const publishDirectory = join(localDirectory, 'publish');
+  const candidates = [
+    localDirectory,
+    publishDirectory,
+    join(publishDirectory, 'config'),
+    join(publishDirectory, 'settings.json'),
+    join(publishDirectory, 'secrets.json'),
+    join(publishDirectory, 'publisher-config.json'),
+  ];
+  for (const path of candidates) {
+    try {
+      const info = await lstat(path);
+      if (info.isSymbolicLink()) throw new Error(`Refusing symbolic link in private publishing path: ${path}`);
+      if (path === localDirectory && !info.isDirectory()) throw new Error(`Expected private directory: ${path}`);
+      if (path !== localDirectory) throw new Error(`Local publishing setup already exists at ${path}; review it instead of overwriting it`);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+}
+
 export async function setupPublish({
   argv = [],
   root = projectRoot,
@@ -55,7 +78,11 @@ export async function setupPublish({
 } = {}) {
   const parsed = parseSetupPublishArgs(argv);
   if (parsed.help) return { help: true, message: setupPublishHelp };
+  if (process.platform === 'win32') throw new Error('Publishing requires a POSIX host; Windows is not supported');
   const project = resolve(root);
+  // Refuse an existing operator setup before checking credentials or prompting
+  // for secrets. A failed rerun must never create a second credential bundle.
+  await assertFreshPublishDirectory(project);
   const pythonBinary = requirePython3(python, pythonExecutor);
   const script = resolve(publisherScript ?? join(project, 'integrations/moltbook-publisher/publish.py'));
   if (!existsSync(script)) throw new Error(`Bundled publisher script was not found at ${script}`);
@@ -71,7 +98,7 @@ export async function setupPublish({
 
   const localDirectory = join(project, '.local');
   const publishDirectory = join(localDirectory, 'publish');
-  await mkdir(localDirectory, { recursive: true, mode: 0o700 });
+  await createPrivateDirectory(localDirectory);
   // mkdir without recursive is intentional: setup must never replace a prior
   // operator configuration or silently merge credentials into it.
   await createPrivateDirectory(publishDirectory);

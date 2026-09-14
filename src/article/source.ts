@@ -31,7 +31,7 @@ function quoteFor(reply: string): string | undefined {
   const completeSentence = normalized
     .match(/.+?(?:[.!?]+(?=\s+[A-Z0-9“'"(]|$)|$)/gu)
     ?.map((sentence) => sentence.trim())
-    .find((sentence) => sentence.length <= 220);
+    .find((sentence) => sentence.length <= 220 && /[.!?]$/u.test(sentence));
   return completeSentence;
 }
 

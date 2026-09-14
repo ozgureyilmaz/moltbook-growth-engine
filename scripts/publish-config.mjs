@@ -1,7 +1,7 @@
-import { chmod, mkdir, open, readFile, stat, unlink, link } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, unlink, link } from 'node:fs/promises';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse, stringify } from 'yaml';
 
 export const PUBLISH_SECRET_KEYS = [
@@ -26,6 +26,26 @@ export const DEFAULT_PUBLISHER_CONFIG = {
   contract_secret_environment_variable: 'MOLTBOOK_PUBLISHER_CONTRACT_SECRET',
 };
 
+const PUBLISHER_PATH_KEYS = new Set([
+  'project_dir',
+  'pending_dir',
+  'handoff_dir',
+  'lock_path',
+  'state_path',
+  'operation_lock_path',
+]);
+
+function isWithin(root, candidate) {
+  const rootPath = resolve(root);
+  const candidatePath = resolve(candidate);
+  const path = relative(rootPath, candidatePath);
+  return path === '' || (path !== '..' && !path.startsWith(`..${pathSeparator()}`) && !isAbsolute(path));
+}
+
+function pathSeparator() {
+  return process.platform === 'win32' ? '\\' : '/';
+}
+
 export function validateAccount(account) {
   if (typeof account !== 'string' || !/^[A-Za-z0-9_-]+$/u.test(account)) {
     throw new Error('--account must be the claimed agent name (letters, numbers, underscores, hyphens)');
@@ -36,7 +56,10 @@ export function validateAccount(account) {
 export function absoluteFromRoot(root, value, fallback) {
   const selected = value ?? fallback;
   if (typeof selected !== 'string' || selected.trim() === '') throw new Error('Configured path must be a non-empty string');
-  return isAbsolute(selected) ? resolve(selected) : resolve(root, selected);
+  const resolvedRoot = resolve(root);
+  const path = isAbsolute(selected) ? resolve(selected) : resolve(resolvedRoot, selected);
+  if (!isWithin(resolvedRoot, path)) throw new Error(`Configured path must remain inside the project: ${selected}`);
+  return path;
 }
 
 export function canonicalProjectPaths(root, system = {}) {
@@ -62,7 +85,10 @@ export function buildPublishSystemConfig(source, root) {
   const system = parse(source || '{}');
   if (!system || typeof system !== 'object' || Array.isArray(system)) throw new Error('config/system.yaml must contain a YAML object');
   system.environment = 'production';
-  system.execution = { ...(system.execution ?? {}), dry_run_by_default: false };
+  // Keep the generated production gates enabled for an explicit publish, but
+  // never make a freshly-created clone publish merely because its config was
+  // prepared.
+  system.execution = { ...(system.execution ?? {}), dry_run_by_default: true };
   system.source = {
     ...(system.source ?? {}),
     mode: 'authorized_autonomous',
@@ -107,14 +133,30 @@ export function buildPublishSystemConfig(source, root) {
 
 export function buildPublisherConfig(account, root, overrides = {}) {
   validateAccount(account);
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error('Publisher overrides must be an object');
   const { system, paths: configuredPaths, ...publisherOverrides } = overrides;
-  const paths = configuredPaths ?? canonicalProjectPaths(root, system ?? {});
+  const pathOverrides = Object.keys(publisherOverrides).filter((key) => PUBLISHER_PATH_KEYS.has(key));
+  if (pathOverrides.length > 0) throw new Error(`Publisher paths are generated from this project and cannot be overridden: ${pathOverrides.join(', ')}`);
+  const canonical = canonicalProjectPaths(root, system ?? {});
+  const paths = configuredPaths ?? canonical;
+  if (configuredPaths) {
+    for (const name of Object.keys(canonical)) {
+      if (paths[name] !== canonical[name]) throw new Error(`Publisher path ${name} does not match the loaded project configuration`);
+    }
+  }
+  const project = resolve(root);
+  const operationLockPath = join(paths.handoffPath, 'publish-operation.lock');
+  const publisherLockPath = join(paths.handoffPath, 'publisher.lock');
+  const statePath = join(paths.handoffPath, 'publisher-state.json');
   return {
     ...DEFAULT_PUBLISHER_CONFIG,
     account,
-    project_dir: resolve(root),
+    project_dir: project,
     pending_dir: paths.pendingPath,
     handoff_dir: paths.handoffPath,
+    lock_path: publisherLockPath,
+    state_path: statePath,
+    operation_lock_path: operationLockPath,
     ...publisherOverrides,
     secret_provider: 'environment',
     api_key_environment_variable: 'MOLTBOOK_API_KEY',
@@ -142,18 +184,20 @@ export function buildPublishSettings({ account, root, python, script, configDire
         acknowledged_path: resolve(paths.acknowledgedPath),
         failed_path: resolve(paths.failedPath),
         handoff_path: resolve(paths.handoffPath),
+        operation_lock_path: resolve(join(paths.handoffPath, 'publish-operation.lock')),
       },
     },
   };
 }
 
 export function pythonAvailable(python = 'python3', executor = spawnSync) {
-  const result = executor(python, ['-c', 'import sys; raise SystemExit(0 if sys.version_info[0] >= 3 else 1)'], { stdio: 'ignore' });
+  const result = executor(python, ['-c', 'import os,sys; raise SystemExit(0 if os.name == "posix" and sys.version_info >= (3, 10) else 1)'], { stdio: 'ignore' });
   return result?.status === 0;
 }
 
 export function requirePython3(python = 'python3', executor = spawnSync) {
-  if (!pythonAvailable(python, executor)) throw new Error(`Python 3 is required but was not found: ${python}`);
+  if (process.platform === 'win32') throw new Error('Publishing requires a POSIX host; Windows is not supported');
+  if (!pythonAvailable(python, executor)) throw new Error(`Python 3.10+ on POSIX is required but was not found: ${python}`);
   return python;
 }
 
@@ -202,15 +246,22 @@ export async function writeExclusiveAtomic(path, value, mode = 0o600) {
 }
 
 export async function ensurePrivatePath(path, kind = 'file') {
-  if (process.platform === 'win32') return;
-  const info = await stat(path);
+  const info = await lstat(path);
+  if (info.isSymbolicLink()) throw new Error(`Refusing symbolic link for private path: ${path}`);
   if (kind === 'directory' && !info.isDirectory()) throw new Error(`Expected private directory: ${path}`);
   if (kind === 'file' && !info.isFile()) throw new Error(`Expected private file: ${path}`);
-  if ((info.mode & 0o077) !== 0) throw new Error(`Refusing insecure permissions on ${path}; use mode 600 for files and 700 for directories`);
+  if (process.platform !== 'win32' && (info.mode & 0o077) !== 0) throw new Error(`Refusing insecure permissions on ${path}; use mode 600 for files and 700 for directories`);
 }
 
 export async function createPrivateDirectory(path) {
-  await mkdir(path, { mode: 0o700 });
+  try {
+    const existing = await lstat(path);
+    if (existing.isSymbolicLink()) throw new Error(`Refusing symbolic link for private directory: ${path}`);
+    if (!existing.isDirectory()) throw new Error(`Expected private directory: ${path}`);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    await mkdir(path, { mode: 0o700 });
+  }
   await chmod(path, 0o700);
   await ensurePrivatePath(path, 'directory');
 }
@@ -218,9 +269,13 @@ export async function createPrivateDirectory(path) {
 export async function readPrivateJson(path) {
   await ensurePrivatePath(path, 'file');
   try {
-    return JSON.parse(await readFile(path, 'utf8'));
-  } catch (error) {
-    throw new Error(`Unable to read private JSON at ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    const value = JSON.parse(await readFile(path, 'utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('private JSON must be an object');
+    return value;
+  } catch {
+    // Never echo parser details or decoded values from a private file. In
+    // particular, malformed secrets must not become an accidental log sink.
+    throw new Error(`Unable to read private JSON at ${path}`);
   }
 }
 

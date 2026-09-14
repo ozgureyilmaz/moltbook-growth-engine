@@ -48,17 +48,18 @@ export function livePlan(argv) {
   if (!options.has('actions')) options.set('actions', '5');
   if (!options.has('search-limit')) options.set('search-limit', '10');
   if (!options.has('output')) options.set('output', 'reports/');
-  if (options.get('with-agent-quotes') === 'true' && options.get('no-agent-quotes') === 'true') throw new Error('Choose either --with-agent-quotes or --no-agent-quotes');
+  if (options.has('with-agent-quotes') && options.has('no-agent-quotes')) throw new Error('Choose either --with-agent-quotes or --no-agent-quotes');
   if (!options.get('output').endsWith('.md') && !options.get('output').endsWith('/')) options.set('output', `${options.get('output')}/`);
-  const values = [...options].flatMap(([key, value]) => booleanFlags.has(key) ? (value === 'true' ? [`--${key}`] : []) : [`--${key}`, value]);
+  const values = [...options].filter(([key]) => !booleanFlags.has(key)).flatMap(([key, value]) => [`--${key}`, value]);
+  const quoteArgs = options.get('with-agent-quotes') === 'true' || options.get('no-agent-quotes') === 'false' ? ['--with-agent-quotes'] : ['--no-agent-quotes'];
   const doctor = ['doctor', '--public-read', '--article-url', article, '--model-smoke'];
   if (publish) doctor.push('--live-read', '--autonomous', '--publisher');
   return {
     publish,
     doctor,
     run: publish
-      ? ['marx-specific-cycle', ...values, '--real-model', '--publish']
-      : ['article-run', ...values, '--dry-run', '--real-model', ...(options.get('with-agent-quotes') === 'true' ? ['--with-agent-quotes'] : ['--no-agent-quotes'])],
+      ? ['marx-specific-cycle', ...values, ...quoteArgs, '--real-model', '--publish']
+      : ['article-run', ...values, '--dry-run', '--real-model', ...quoteArgs],
   };
 }
 

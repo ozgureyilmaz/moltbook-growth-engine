@@ -39,7 +39,7 @@ export type RuntimeConfig = {
   };
   publisher_bridge?: {
     enabled?: boolean;
-    type?: "hermes_outbox";
+    type?: "hermes_outbox" | "local_process";
     binary?: string;
     provider?: string;
     model?: string;
@@ -235,7 +235,7 @@ function validateConfig(value: unknown): RuntimeConfig {
   positiveInteger("config.source.max_pages", source?.max_pages, 4);
   if (publishing?.enabled !== undefined && typeof publishing.enabled !== "boolean") throw new Error("config.publishing.enabled must be boolean");
   if (publisherBridge?.enabled !== undefined && typeof publisherBridge.enabled !== "boolean") throw new Error("config.publisher_bridge.enabled must be boolean");
-  if (publisherBridge?.type !== undefined && publisherBridge.type !== "hermes_outbox") throw new Error("config.publisher_bridge.type must be hermes_outbox");
+  if (publisherBridge?.type !== undefined && !["hermes_outbox", "local_process"].includes(String(publisherBridge.type))) throw new Error("config.publisher_bridge.type must be hermes_outbox or local_process");
   if (publisherBridge?.contract_secret_provider !== undefined && !["macos-keychain", "environment"].includes(String(publisherBridge.contract_secret_provider))) throw new Error("config.publisher_bridge.contract_secret_provider must be macos-keychain or environment");
   if (publisherBridge?.contract_secret_environment_variable !== undefined && (typeof publisherBridge.contract_secret_environment_variable !== "string" || !/^[A-Z][A-Z0-9_]*$/u.test(publisherBridge.contract_secret_environment_variable))) throw new Error("config.publisher_bridge.contract_secret_environment_variable must be an uppercase environment variable name");
   for (const [name, value] of [["contract_keychain_service", publisherBridge?.contract_keychain_service], ["contract_keychain_account", publisherBridge?.contract_keychain_account], ["contract_key_id", publisherBridge?.contract_key_id]] as const) {

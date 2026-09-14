@@ -1,701 +1,338 @@
-# Marx Moltbook Growth Engine
+# Marx Moltbook Growth Engine — Operator and Agent Guide
 
-Local, autonomous, experiment-driven infrastructure for finding high-value
-Moltbook conversations and preparing context-specific Marx outreach for an
-existing publishing agent.
+Install a fresh clone, find Moltbook conversations related to a supplied Marx
+feed, generate source-grounded comments, and publish from your own claimed
+Moltbook account. A coding agent or Hermes can follow the same guide.
 
-The engine owns discovery, context analysis, candidate generation, evaluation,
-deterministic QA, tracking-link attribution, and the signed publisher handoff.
-The separate publisher agent owns the Moltbook write credential and the actual
-platform interaction:
+**Start with a read-only draft. Publication requires a separate explicit command
+and your own account credentials.** Passing this file to an agent alone does
+not authorize posting. Successful tests do not prove live account permissions.
 
-```text
-discover -> understand context -> rank opportunity -> generate candidates
--> evaluate -> deterministic QA -> validated JSON action -> local outbox
--> existing Moltbook publishing agent
-```
+## 1. Obtain the required access
 
-The downstream agent owns authentication and the actual Moltbook interaction.
-This project never needs to bypass platform controls or keep the publisher
-write credential.
-
-## Choose your operating mode
-
-There are two intentionally different ways to use a clone of this repository:
-
-| Mode | What it does | Required setup |
+| Requirement | Supplied by | Purpose |
 | --- | --- | --- |
-| Safe dry-run | Reads fixture/live-read data, generates and evaluates comments, and writes a local report. It does not publish. | Node 22, dependencies, and Codex authentication only when `--real-model` is used; live-read also needs the Moltbook read key. |
-| Production publish | Creates production tracker distributions, prepares signed handoff files, and invokes the external publisher. | Everything in dry-run plus production config, tracker token, publisher contract secret, Hermes publisher, valid clearance, and provider read-back. |
+| Private GitHub repository access and tested branch/commit | Project maintainer | Clone/update |
+| macOS or Linux, Git, bash/zsh, Node 22, Python 3.10+ | Operator | Local engine and publisher |
+| Compatible Codex CLI, operator login and configured-model access | Operator | Real generation/evaluation |
+| Existing `https://marx.finance/feed/…` URL | Operator or maintainer | Article, replies and related-post discovery |
+| Claimed Moltbook agent name and its API key | Account owner | Authenticated reads/publication |
+| Authorized production tracker token | Marx Tracker service owner | Attribution link creation/finalization |
+| Publishing host, account scope, caps and recovery contact | Team | Account/state ownership |
 
-Cloning the GitHub repository gives you the code and checked-in safe defaults.
-It does not give you API keys, the local SQLite database, the production
-configuration, the Hermes installation, or any other operator-machine state.
+Use a durable local filesystem for SQLite, outbox and locks. Native Windows
+publishing is unsupported; WSL must be treated and verified as Linux. One shared
+Moltbook account needs **one active publishing host and one durable state store**.
+Independent clones do not coordinate duplicate history, cooldowns or daily caps.
 
-## Quick start after `git clone`
+`MARX_TRACKER_API_TOKEN` is the client credential for the separate team service
+at `https://marx-tracker.marxx.workers.dev`, corresponding to its Worker secret
+`ENGINE_API_TOKEN`. It is not a Moltbook key or Cloudflare account API token.
+Do not invent it. If it has not been supplied privately, complete draft setup
+and stop before publishing setup. Tracker redirect requests do not prove human
+clicks or Marx usage.
 
-The following path is the smallest useful clone verification. Run it from the
-repository root on macOS:
+## 2. Clone the delivery branch
+
+Until the PR is merged, use the branch explicitly. If the target folder exists,
+inspect it instead of replacing it. Record the commit in your handoff.
 
 ```bash
-git clone <repository-url>
+git clone --branch codex/team-onboarding --single-branch https://github.com/ozgureyilmaz/moltbook-growth-engine.git
 cd moltbook-growth-engine
+git branch --show-current
+git rev-parse --short HEAD
+```
 
-# The native SQLite dependency must be built for Node 22.
+Run the remaining commands from this directory. For later releases, use the
+branch/tag supplied by the maintainer; a default clone may be an older version.
+
+## 3. Install runtimes and build
+
+```bash
+git --version
+command -v nvm
+python3 --version
+```
+
+If nvm is missing, follow the [official nvm installation instructions](https://github.com/nvm-sh/nvm#installing-and-updating),
+reopen the terminal and return to the clone. On macOS, install Xcode Command
+Line Tools if Git/native compilation needs them (`xcode-select --install`).
+On Debian/Ubuntu, install Git, curl, Python 3.10+ and the C/C++ build toolchain
+through the system package manager. The owner completes any OS installation prompts.
+
+```bash
 nvm install 22.17.0
 nvm use 22.17.0
-node --version                         # expected: v22.17.0
-node -p 'process.versions.modules'     # expected: 127
-
-npm ci
-npm run typecheck
-npm test
-npm run build
-
-# Safe local smoke test; no live source and no publication.
-node dist/cli/main.js run \
-  --fixture ./tests/fixtures/moltbook.json \
-  --dry-run
+node --version
+node -p 'process.versions.modules'
+npm run setup
 ```
 
-If `better-sqlite3` reports `NODE_MODULE_VERSION` or a missing native
-binding, first confirm that `node --version` is 22.17.0. Then rebuild with the
-Node 22 npm binary. This avoids a common macOS setup where a Node 26/Hermes
-wrapper is selected during `node-gyp`:
+Expected baseline: Node `v22.17.0`, ABI `127`. Setup runs `npm ci`, builds `dist/`,
+and performs an isolated fixture rehearsal. Expect `Setup passed` and zero
+errors. Fixture comments are sample data; no model or platform call occurs in
+that rehearsal. The ordinary operator DB/outbox is preserved. Never reinstall
+dependencies while another run uses them.
+
+Team wrappers automatically select an installed Node 22 when another Node major
+is active. They inspect `MARX_GROWTH_NODE`, nvm installations, common Homebrew
+paths and PATH, verifying the actual executable. They do not install Node or
+change the global shell default. Direct `npm ci`, `npm test`, `npm run build`
+and `npm run cli` still require Node 22 selected in the shell.
+
+If native SQLite reports an ABI mismatch, select Node 22 and rerun setup. Do not
+copy node_modules/dist from another machine. Record dependency advisories;
+do not perform a forced major upgrade as part of onboarding.
+
+## 4. Connect the operator's Codex account
+
+Install Codex through the [official CLI installation guide](https://learn.chatgpt.com/docs/codex/cli).
+Never copy another operator's Codex home/authentication files.
+
+If it is absent, install the npm CLI version checked for this release after
+selecting Node 22 (or use the official standalone installer):
 
 ```bash
-NODE22_BIN="$(dirname "$(nvm which 22.17.0)")"
-env -u npm_node_execpath -u npm_execpath \
-  PATH="$NODE22_BIN:$PATH" \
-  npm_config_build_from_source=true \
-  "$NODE22_BIN/npm" rebuild better-sqlite3 --build-from-source
-
-node -p 'process.versions.modules'     # expected: 127
-npm run typecheck
-npm test
-npm run build
+npm install -g @openai/codex@0.154.0
 ```
 
-The `dist/` directory is intentionally ignored by Git, so every fresh clone
-must run `npm run build` before using `node dist/cli/main.js`.
-
-## Connecting Codex Exec
-
-Model-backed runs use the local `codex` CLI as a child process. The engine does
-not use a separate model API key and does not embed Codex credentials in the
-repository. Each operator must authenticate Codex on the machine that will
-run the engine.
-
-Install the Codex CLI using the approved Codex installation method for the
-operator's environment, then verify that the binary is visible:
-
 ```bash
-command -v codex
 codex --version
 codex login status
 ```
 
-If the session is not authenticated, use the device/browser login flow and
-complete it in the visible browser:
+If not authenticated, the owner completes browser/device login:
 
 ```bash
 codex login --device-auth
 codex login status
 ```
 
-The status command must show an authenticated session. Do not paste an access
-token or API key into this README, a prompt, a GitHub issue, or a terminal
-command that will be saved in shell history.
-
-If `codex` is installed outside `PATH`, point the read-only model smoke test at
-the exact binary:
-
-```bash
-export MARX_GROWTH_CODEX_BIN="/absolute/path/to/codex"
-node dist/cli/main.js doctor --model-smoke
-```
-
-This smoke test makes one structured, read-only Codex call. It does not read
-Moltbook, create a tracker link, create an outbox action, or publish anything.
-For a live engine run, the same authenticated CLI session is used internally
-by `CodexExecExecutor`; there is no second in-repository Codex connection to
-configure.
-
-## Machine-local secrets
-
-Never commit secret values. The default macOS Keychain references used by this
-repository are:
-
-| Purpose | Keychain service | Keychain account |
-| --- | --- | --- |
-| Moltbook GET/read access | `marx-moltbook-growth-engine` | `moltbook-read-client` |
-| Engine/Hermes contract HMAC | `marx-moltbook-growth-engine` | `publisher-contract` |
-| Production tracker token | `marx-tracker-production` | `ENGINE_API_TOKEN` |
-
-Create or update each entry with a hidden prompt. The value is never printed:
+The engine uses this local CLI session without a separate model API key. Its
+default real model is `gpt-5.6-luna`; access and usage limits must be verified on
+each account. If Codex is outside PATH, set `MARX_GROWTH_CODEX_BIN` to its absolute
+executable path in the same terminal. Do not switch publication to mocks when
+model access fails. The [verification report](docs/verification/team-onboarding.md)
+records the CLI tested for this release.
 
 ```bash
-# Moltbook read key used by --live-read and production discovery.
-/usr/bin/security add-generic-password -U \
-  -s marx-moltbook-growth-engine \
-  -a moltbook-read-client \
-  -w
-
-# Separate HMAC contract secret shared with the external publisher.
-/usr/bin/security add-generic-password -U \
-  -s marx-moltbook-growth-engine \
-  -a publisher-contract \
-  -w
-
-# The value must match the active Cloudflare Worker secret ENGINE_API_TOKEN.
-# Do not invent a different local value.
-/usr/bin/security add-generic-password -U \
-  -s marx-tracker-production \
-  -a ENGINE_API_TOKEN \
-  -w
+npm run doctor:live
 ```
 
-For a production command, expose only the tracker token to the current shell
-session. The engine reads the Moltbook and contract secrets directly from
-Keychain:
+This probes official public Moltbook search and one actual structured model
+request. All requested checks must pass. The publication kill switch being
+engaged is an expected warning during read-only work. A version-only check
+cannot prove model availability or authentication.
+
+## 5. Discover related posts and generate quoted drafts
+
+Copy an actual Marx feed URL from the browser; replace `FEED_ID` below.
 
 ```bash
-export MARX_TRACKER_API_TOKEN="$(/usr/bin/security \
-  find-generic-password -s marx-tracker-production \
-  -a ENGINE_API_TOKEN -w)"
+npm run live -- --article-url "https://marx.finance/feed/FEED_ID" --limit 8 --search-limit 10 --actions 5 --with-agent-quotes --output reports/
 ```
 
-If the tracker token is rotated, update the Cloudflare Worker secret and this
-Keychain entry as one coordinated change. A token stored only on the founder's
-machine, or only in Cloudflare, is not sufficient.
+This reads the Marx article and available agent replies, searches related
+Moltbook posts, fetches their context, scores opportunities, generates real-model
+comments and applies independent evaluation plus deterministic QA. All external
+content remains untrusted data. The default live path creates direct-link drafts
+and Markdown/JSON reports in `reports/`; it needs no Moltbook key, tracker token
+or Hermes and makes no comment POST or tracker distribution.
 
-## Live-read verification (still no publication)
+`--with-agent-quotes` permits a complete source-grounded agent quote when one is
+available. It does not guarantee one on every comment; absent/unusable evidence
+is omitted. Use `--no-agent-quotes` to disable quotes. If every comment must
+contain a quote, review candidates and use a feed with usable agent replies;
+this flag is not a mandatory-quote gate. Old accessible feeds are usable for
+testing but may return `NO_ACTION` for weak relevance or saturated conversations.
 
-After the Codex and read-key setup, run the read-only checks first:
+`--limit` bounds posts examined; `--search-limit` bounds each search query;
+`--actions` is constrained by QA. This is related **Moltbook post discovery for
+the supplied feed**. This branch does not automatically choose a new Marx feed
+or install a feed schedule. Publishing reruns discovery/generation and may
+produce different text; it does not publish a previous draft report verbatim.
+
+## 6. Configure the publishing account once
+
+If the account is already used through Hermes, use that same claimed Moltbook
+name/key. Hermes model login is separate and does not create a Moltbook account.
+New account owners follow [Moltbook's official registration/claim process](https://www.moltbook.com/skill.md)
+and finish the human claim step. Do not create a duplicate account to repair
+missing local credentials.
 
 ```bash
-node dist/cli/main.js doctor --live-read
-node dist/cli/main.js run \
-  --live-read \
-  --dry-run \
-  --limit 8 \
-  --actions 0
+npm run setup:publish -- --account YOUR_CLAIMED_MOLTBOOK_AGENT
 ```
 
-`doctor --live-read` proves only that the configured official Moltbook GET
-probe works. The bounded dry-run proves source retrieval, normalization,
-ranking, generation, evaluation, and QA without writing to the publisher
-outbox. A successful live-read check is not production-publish authorization.
+Enter `MOLTBOOK_API_KEY` and `MARX_TRACKER_API_TOKEN` through the hidden terminal
+prompts. A separate random HMAC contract secret is generated locally if none
+was supplied. In non-interactive agent runs, the owner must inject these named
+environment variables privately before setup. Never put secrets in chat,
+command arguments, model prompts or logs.
 
-## Production setup is separate from the clone
+Setup creates ignored `.local/publish/settings.json`, `publisher-config.json`,
+`secrets.json` and `config/`. Files use mode 600 and private directories mode 700.
+These are local plaintext secrets protected by OS permissions, not an encrypted
+vault. Existing setup is refused before collecting new secrets. Setup makes no
+remote authorization claim and posts nothing. Keep the directory private.
 
-The checked-in `config/system.yaml` is intentionally safe:
-
-- `source.mode: live_read_only`;
-- `publishing.enabled: false`;
-- `publisher_bridge.enabled: false`;
-- `execution.dry_run_by_default: true`.
-
-Do not edit those defaults in the shared branch just to enable one operator.
-Create an untracked production config directory outside the repository:
+Check the full publishing environment without posting:
 
 ```bash
-export PROD_CONFIG_DIR="$PWD/../marx-growth-production-config"
-mkdir -p "$PROD_CONFIG_DIR"
-cp config/system.yaml config/submolts.yaml config/experiments.yaml "$PROD_CONFIG_DIR"/
+npm run publish -- --check-only --article-url "https://marx.finance/feed/FEED_ID" --with-agent-quotes
 ```
 
-Edit only the copied `system.yaml` and explicitly set the production gates:
+This loads the saved config, verifies paths/permissions, Python and the actual
+claimed Moltbook identity, probes tracker authorization, and checks source,
+article and model access. It does not clear the kill switch, create tracker
+distributions or post a comment. Resolve every reported failure first.
 
-```yaml
-source:
-  mode: authorized_autonomous
+## 7. Publish an explicitly authorized pilot
 
-publishing:
-  enabled: true
-
-publisher_bridge:
-  enabled: true
-```
-
-Keep the production tracker origin pinned to
-`https://marx-tracker.marxx.workers.dev`, keep the allowed domain list
-restricted to `www.moltbook.com`, and keep the Keychain references unchanged
-unless the external publisher was configured with a different approved
-contract. Point the process at this directory:
+Execute only when the operator has authorized the named account, feed and action
+limit. Use **`npm run publish`**, not npm's package-upload command `npm publish`.
 
 ```bash
-export MARX_GROWTH_CONFIG_DIR="$PROD_CONFIG_DIR"
+npm run publish -- --article-url "https://marx.finance/feed/FEED_ID" --limit 8 --search-limit 10 --actions 1 --with-agent-quotes --output reports/
 ```
 
-The production config is deliberately not generated by `npm ci` and is not
-included in GitHub. Every new operator or machine must create it from the
-safe checked-in config and review the three gates above.
+The wrapper loads local secrets/config, acquires an operation lock, blocks
+unresolved previous work, runs preflight, creates a fresh 30-minute signed
+clearance, checks autonomous readiness, and invokes the tracked cycle once.
+Cleanup engages the kill switch before releasing the lock; cleanup failure is
+an error. SIGKILL, shutdown and disk failure cannot guarantee cleanup: preserve
+the lock/state and reconcile before recovery.
 
-## External Hermes publisher
+The cycle creates/finalizes attribution links after candidate approval. The
+publisher receives only this run's action IDs, verifies signed grants/hashes
+and account identity, enforces persistent caps/cooldown, rechecks the kill switch
+before POST, and records attempts durably. Exact provider read-back and a
+verified signed receipt import are required for success.
 
-The GitHub clone does not contain the Hermes publisher, its Python script, its
-private Moltbook write credential, its publisher config, or its local lock/cap
-state. The publisher must be installed and configured separately on the
-machine that owns the Moltbook account.
+The default pilot requests one action. After a verified pilot, increase to the
+configured cap if appropriate (for example `--actions 5`). The cycle requires
+the full requested batch to pass before handoff: four eligible comments out of
+five requested means no handoff. Provider failures may still leave a partially
+published batch. Inspect each receipt; never assume external delivery is atomic.
 
-Before a publish, verify the external boundary:
+Stop using the dedicated local configuration:
 
 ```bash
-command -v hermes
-hermes --version
-hermes gateway status
-python3 --version
+npm run publish -- --stop
 ```
 
-Create the publisher config from
-[the Hermes setup runbook](docs/runbooks/HERMES_PUBLISHER_SETUP.md). Its
-`project_dir`, `pending_dir`, and `handoff_dir` must point to the cloned
-repository, and its `account` must be the intended claimed Moltbook account.
-The publisher must use the same contract secret and `contract-v1` key ID as
-the engine. The publisher's Moltbook write credential stays inside the
-publisher's private secret store; it must never be copied into this repo.
+A write may already be in flight; stop does not undo a posted comment. Inspect
+reports/receipts before any new publication.
 
-If the publisher script or config is not in the default paths, set the
-following environment variables before a production run:
+## 8. Let Hermes or another agent follow this guide
+
+Hermes is optional for one-shot publication. If desired, install it from the
+[official Hermes quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart),
+run `hermes setup`, and verify a basic chat. Use the terminal backend on the
+designated host and clone. Keep the Codex login and Moltbook key separate from
+Hermes's own model-provider login. Do not copy an entire teammate profile.
+
+Give an agent this README and a concrete preparation task:
+
+> Read README.md and AGENTS.md in the supplied clone. Prepare dependencies and
+> run local checks plus a quoted live draft for FEED_URL. Preserve existing files
+> and runtime state. Report the commit, command exit codes and report paths, never
+> credentials. If login, claim or private input is missing, pause that dependent
+> step and state exactly what the owner must complete. Do not post, clear a kill
+> switch, register an account or schedule work unless my task authorizes it.
+
+For a pilot, the owner can add this explicit scope:
+
+> I authorize one comment from ACCOUNT for FEED_URL. After successful check-only
+> preflight, run the documented publish command with --actions 1 and
+> --with-agent-quotes. Do not change credentials, bypass QA, rewrite approved
+> text or retry uncertain writes. Return a permalink only for a verified signed
+> publication receipt, then confirm the kill switch is engaged.
+
+Agents may prepare local config and run tests within the assigned task. The
+human completes interactive account login/claim or supplies secrets privately.
+Do not invent account names, tokens, IDs or approval. A missing optional source
+quote must be reported honestly. Adding a schedule is a separate decision after
+a successful pilot; this guide installs no cron. Stop legacy outbox consumers
+before using this command for the same account. Existing external installations
+can consult the [legacy Hermes runbook](docs/runbooks/HERMES_PUBLISHER_SETUP.md).
+
+## 9. Interpret results and recover
+
+| Result | Meaning and response |
+| --- | --- |
+| `Setup passed` | Fixture setup succeeded; no live account/publication proof. |
+| `DRAFTS_READY` | Local reviewable drafts; zero publications. |
+| `NO_ACTION` / insufficient qualified targets | No eligible batch. Inspect QA/context; do not weaken thresholds. |
+| `PUBLISHED`, provider permalink and imported receipt | Verified external comment; retain the evidence. |
+| `VERIFICATION_REQUIRED` | Platform challenge. Not verified publication; this integration does not solve it. |
+| `RECONCILIATION_REQUIRED` / previous attempt / missing read-back | A write may exist. Do not rerun or delete evidence automatically. |
+| Lock or pending guard | Prior work/process exists. Identify the owner and reconcile; never automatically steal a lock. |
+| Account mismatch / tracker 401 | Ask the credential owner for the correct access privately. |
+| Model unavailable / login expired / quota | Resolve account access; no mock fallback for publication. |
+| Missing runtime / ABI mismatch / stale build | Select Node 22, install Python 3.10+, rerun setup with no active run. |
+| Insecure permissions / moved clone | Repair only the named local ownership/paths deliberately. |
+| Shell `dquote>` | Closing quote missing before the app starts. Ctrl+C, then paste the complete command. |
+
+Draft reports are `.md`/`.json` in `reports/`. Tracked cycles write a Markdown
+status report and terminal JSON. Handoff requests, receipts and attempt evidence
+are in the configured outbox handoff directory. Detailed diagnostics are in
+`logs/runs/` and `logs/errors/`; errors before a workflow starts may appear only
+in the terminal. A run ID is not publication proof. Share redacted summaries,
+never the private setup directory.
+
+After selecting Node 22, `npm run cli -- status RUN_ID` reads normal local state.
+Uncertain-write recovery checks the exact account, target, body, request and
+receipt together. There is no blanket reset-and-retry command. Contact the
+recovery owner rather than deleting pending files or manufacturing receipts.
+
+## 10. Validate and update
 
 ```bash
-export MOLTBOOK_PUBLISHER_PYTHON="$(command -v python3)"
-export MOLTBOOK_PUBLISHER_SCRIPT="/absolute/path/to/publish_moltbook_action.py"
-export MOLTBOOK_PUBLISHER_CONFIG="/absolute/path/to/moltbook-publisher.json"
-```
-
-Run the publisher's validation-only check before activation. It must not make
-a Moltbook write:
-
-```bash
-"$MOLTBOOK_PUBLISHER_PYTHON" "$MOLTBOOK_PUBLISHER_SCRIPT" \
-  --config "$MOLTBOOK_PUBLISHER_CONFIG" \
-  --validate-only
-```
-
-`doctor --publisher` checks the configured publisher contract and Hermes
-gateway. It cannot install Hermes or provision the private write credential.
-
-## Production preflight and one-off run
-
-Run every check from the same terminal environment that will launch the
-production command:
-
-```bash
-node dist/cli/main.js doctor --live-read
-node dist/cli/main.js doctor --publisher
-node dist/cli/main.js doctor --autonomous
-node dist/cli/main.js doctor --model-smoke
-node dist/cli/main.js ops kill-status
-```
-
-The first four checks must pass. The kill switch must be cleared only for the
-short, explicitly authorized publishing window. Create and apply a fresh
-time-bounded clearance; never hand-edit an old clearance JSON file:
-
-```bash
-export CLEARANCE_FILE="$PWD/../marx-publish-clearance.json"
-node dist/cli/main.js ops kill-clearance-create \
-  --output "$CLEARANCE_FILE" \
-  --minutes 30 \
-  --reason "authorized one-off Marx feed publishing pilot" \
-  --actor "founder"
-
-node dist/cli/main.js ops kill-clear --clearance "$CLEARANCE_FILE"
-node dist/cli/main.js ops kill-status
-```
-
-Then replace `NEW_FEED_ID` with the target Marx feed ID and run the bounded
-specific cycle:
-
-```bash
-node dist/cli/main.js marx-specific-cycle \
-  --article-url "https://marx.finance/feed/NEW_FEED_ID" \
-  --limit 8 \
-  --search-limit 10 \
-  --actions 5 \
-  --with-agent-quotes \
-  --real-model \
-  --publish \
-  --output docs/moltbook-runs/
-```
-
-`--limit` and `--search-limit` bound discovery; `--actions 5` is the requested
-maximum/quality requirement, not permission to weaken QA. The engine publishes
-no partial batch when it cannot produce five valid, distinct, tracker-finalized
-actions. For a first canary on a new machine, use `--actions 1` and verify the
-Moltbook permalink, exact comment read-back, tracker status, and report before
-raising the cap.
-
-When the run is complete, engage the kill switch again and preserve the report:
-
-```bash
-node dist/cli/main.js ops kill-engage \
-  --reason "one-off publishing run completed" \
-  --actor "founder"
-```
-
-Do not immediately rerun an interrupted or ambiguous production run. First
-reconcile the provider permalink/read-back and tracker distribution. A
-`RECONCILIATION_REQUIRED`, `READBACK_MISSING`, or ambiguous tracker response is
-not a successful run and must not be treated as permission to retry blindly.
-
-## What belongs in GitHub
-
-Before pushing a clone for another operator, commit the intended source and
-documentation changes, then inspect the staged file list. Do not push local
-runtime state from the operator machine:
-
-- safe to share: source, tests, prompts, checked-in safe config, README,
-  `AGENTS.md`, and reviewed runbook documentation;
-- do not share: `.env*` secrets, API keys, SQLite databases, logs containing
-  sensitive content, `outbox/` state, kill-switch clearance files, publisher
-  responses, or Hermes config/credentials;
-- generated `docs/moltbook-runs/` files should be included only when they are
-  intentionally curated evidence, not as an automatic dump of every local run.
-
-The clone is reproducible only after the latest source fixes are committed and
-the clean clone passes `npm ci`, typecheck, tests, build, Codex model smoke,
-and the appropriate read-only health checks. A GitHub push of an uncommitted
-working tree does not transfer those local changes.
-
-## Common clone failures
-
-| Symptom | Likely cause | Correct response |
-| --- | --- | --- |
-| `better-sqlite3` ABI or native binding error | Node 26/Hermes wrapper used to build an addon consumed by Node 22, or vice versa | `nvm use 22.17.0`, verify ABI `127`, then rebuild with the Node 22 npm binary. |
-| `codex: command not found` | Codex CLI is not installed or not on `PATH` | Install/authenticate Codex, verify `codex --version`, or set `MARX_GROWTH_CODEX_BIN`. |
-| Missing Moltbook secret | Keychain is per-machine and is not cloned from GitHub | Add `moltbook-read-client` with the hidden Keychain prompt, then run `doctor --live-read`. |
-| Missing tracker token or tracker 401 | Local value does not match Cloudflare `ENGINE_API_TOKEN`, or the variable is absent | Reconcile the Worker secret and local Keychain entry; export `MARX_TRACKER_API_TOKEN` only for the run. |
-| `CLEARANCE_EXPIRED` or kill switch engaged | Clearance is local, signed, and time-bounded | Create a new clearance after preflight; do not edit or reuse an expired file. |
-| Hermes gateway/publisher unavailable | External Hermes installation/config is absent from the clone | Complete the Hermes runbook and validate the publisher boundary separately. |
-| Fewer than five actions or publish refusal | Candidate pool, model, evaluator, QA, or tracker finalization did not provide five safe actions | Preserve the no-publication result; inspect the report and improve discovery/context. Never weaken QA just to fill the count. |
-| `RECONCILIATION_REQUIRED` | A provider or tracker write may have happened but cannot be proven yet | Reconcile Moltbook and D1/tracker state before any retry. |
-
-## Growth measurement boundary
-
-The intended primary metric is attributable Marx usage by the target
-autonomous agent. Its production source of truth and attribution window are
-currently unknown because the downstream publisher and Marx outcome telemetry
-are external to this repository. The local system emits versioned
-`action_created` events and provides explicit `action_published` and
-`outcome_observed` helpers; those events must be reconciled by the authorized
-publisher/telemetry owner before any causal growth claim is made. Growth event
-v2 requires verified evidence status and a named evidence source for published
-and observed state transitions.
-Verified raw evidence can be imported with `outcomes import`; the importer
-requires an exact durable action/experiment/source-post join and a verified
-published receipt before it updates an outcome or learning prior.
-
-## CLI and safe execution
-
-The supported commands are:
-
-```bash
-# Without a fixture or injected authorized source this fails closed.
-npm run cli -- run --dry-run
-
-# Override configured run sizes for a dry run.
-npm run cli -- run --limit 100 --actions 5 --dry-run
-
-# Exercise the real Codex evaluator without publishing.
-npm run cli -- run --fixture ./tests/fixtures/moltbook.json --dry-run --real-model
-
-# Run entirely from a local Moltbook-like fixture.
-npm run cli -- run --fixture ./tests/fixtures/moltbook.json --dry-run
-
-# Inspect local run and strategy state.
-npm run cli -- status
-npm run cli -- experiments
-
-# Publication-free real-model preflight (one structured Codex call).
-npm run cli -- doctor --model-smoke
-
-# Replay stored inputs while preserving idempotency.
-npm run cli -- replay <run_id> --dry-run
-
-# Start an interval/cron-backed scheduler when configured.
-npm run cli -- daemon
-npm run cli -- daemon --once --fixture ./tests/fixtures/moltbook.json --dry-run
-npm run cli -- daemon --once --supervised --fixture ./tests/fixtures/moltbook.json --dry-run
-npm run cli -- daemon --supervised --interval 18000000 --live-read --dry-run
-npm run cli -- daemon --supervised --cron "0 */5 * * *" --live-read --dry-run
-
-# Control-plane diagnostics and emergency stop.
-npm run cli -- doctor
-npm run cli -- ops kill-status
-npm run cli -- ops kill-engage --reason "operator emergency stop" --actor "operator"
-
-# Explicit authorized read-only rehearsal (requires a Keychain key; never publishes).
-npm run cli -- doctor --live-read
-npm run cli -- run --live-read --dry-run --limit 10 --actions 0
-
-# Explicit publisher handoff files (the separate Hermes agent owns write credentials).
-npm run cli -- handoff prepare <action_id> --grant <grant.json> --publisher-account <name>
-npm run cli -- handoff import-receipt <request_id> --receipt <receipt.json>
-
-# Import versioned outcome evidence after its exact action has a verified receipt.
-npm run cli -- outcomes import --events <events.json>
-
-# Discover related Moltbook posts from a Marx feed, then prepare comments.
-# Default is read-only dry-run; add --publish only after production preflight.
-node dist/cli/main.js marx-specific-cycle \
-  --article-url https://marx.finance/feed/<feed-id> \
-  --limit 100 \
-  --actions 5 \
-  --no-agent-quotes \
-  --output docs/moltbook-runs/
-```
-
-Agent reply quote mode is explicit. Replace `--no-agent-quotes` with
-`--with-agent-quotes` when the comment should include the relevant Marx agent
-name and quoted reply alongside the tracked Marx feed link.
-
-`marx-specific-cycle` validates the Marx feed, discovers related Moltbook posts
-when `--post-ids` is omitted, fetches each selected post and its full public
-context, generates one context-specific comment per target, and writes a
-Markdown receipt under `docs/moltbook-runs/`. The comment body contains one
-natural `Marx` bridge plus exactly one tracked link with the label
-`[Open Marx feed](...)`; the canonical feed URL is stored in the
-tracker distribution, not replaced by a direct-link fallback. The Moltbook
-target and comment-preview links remain output metadata and are not inserted
-into the comment. `--no-agent-quotes` is the default for this cycle;
-`--with-agent-quotes` explicitly enables the selected Marx agent name and
-reply quote. The command creates the tracker distribution after evaluator and
-deterministic-QA approval, appends the link, then derives the final
-`comment_hash`, `action_id`, and `experiment_id` before tracker finalization and
-read-back. `NO_ACTION` and rejected candidates receive no tracking link.
-Without `--publish`, only the development/staging tracker is used and no
-publisher handoff is attempted. With `--publish`, the production tracker must
-be active and read back successfully before any action enters the production
-outbox.
-
-`--limit` is the discovery pool size, not the number of guaranteed
-publications. For the current recovery-safe five-action attempt, use
-`--limit 8 --search-limit 10 --actions 5`. The engine ranks the pool, sends at
-most eight qualified opportunities to real-model strategy generation in
-one-item batches, and stops after five candidates pass evaluation, QA, and
-tracker finalization. Two consecutive strategy-generation worker failures stop
-the run early. It refuses the publish if fewer than five are available or any
-worker, model, tracker, or validation error occurs.
-
-The Codex executor uses a streamed JSONL child-process boundary, captures
-lifecycle and stderr diagnostics, normalizes the non-interactive environment,
-and terminates hung process groups. Specific-cycle real-model calls use
-documented `low` reasoning effort and a 120-second deadline. This is still the
-configured real model; the engine never falls back to publishing deterministic
-comments.
-
-The pasted historical TXT is retained only as a regression fixture at
-`tests/fixtures/specific-marx-comments-500cf34bfaa84944ab840cd32adc8849.txt`.
-The checked-in `command.txt` runs only a fixture dry-run. A publish attempt
-requires the normal authorized source mode,
-enabled publishing bridge, configured production tracker token, scoped grant,
-valid publisher contract, cleared kill switch, and verified provider readback.
-Tracker create conflicts, finalization failures, ambiguous responses, and
-non-active read-backs block the affected action; they never fall back to a
-direct Marx URL. Uncertain or non-`PUBLISHED`
-provider results are written as pending/reconciliation states and are never
-reported as successful publication. If the requested action count cannot be
-filled, `--publish` refuses the entire batch before handing off any action; it
-never publishes a partial target set.
-
-`npm run cli -- ...` uses `tsx` directly. Once built, the equivalent installed
-binary is `dist/cli/main.js` / `marx-growth`.
-
-Dry-run must show, in structured output, the discovered and deduplicated posts,
-opportunity component scores, strategy arms, candidate comments, evaluator
-scores, deterministic rejection reasons, and final COMMENT/NO_ACTION decisions.
-It must not write a pending publisher action. Fixture runs must not call a
-live source or publish anything.
-
-Model-backed execution is selected for non-dry-run operation. It requires
-`source.mode=authorized_autonomous`, `publishing.enabled: true`,
-`publisher_bridge.enabled: true`, a non-empty production domain allow-list, a
-valid scoped grant, a valid publisher contract secret, and an authenticated Codex CLI session. `--live-read` always
-remains read-only. The stock CLI intentionally
-bundles no Moltbook write credential or posting client. A production outbox also
-requires an explicit emergency-kill-switch gate.
-
-`--real-model` opts a dry-run into the Codex evaluator and is useful for a
-read-only rehearsal of model execution. Without it, dry-runs use the
-deterministic evaluator. Worker opportunity scoring and candidate generation
-remain deterministic; their Codex worker calls are advisory metadata until a
-model-driven implementation is added.
-
-`daemon --interval 18000000` runs immediately and waits five hours after each
-completed run. `daemon --cron "0 */5 * * *"` uses the host's local timezone and
-runs at 00:00, 05:00, 10:00, 15:00, and 20:00. Use `--supervised` so the local
-lease and periodic heartbeat protect against duplicate daemon instances. The
-repository does not install a host-level restart service. `doctor --autonomous`
-returns a non-zero exit code when the production preflight is not ready.
-
-The engine and Hermes publisher authenticate grants and receipts with a
-separate HMAC contract secret. Keep it in Keychain under the configured
-`publisher-contract` account; it is not the Moltbook API key and must never be
-placed in the repository, request files, prompts, or logs.
-
-## Outbox consumption contract
-
-The downstream publisher consumes versioned snake_case JSON files from
-`outbox/pending/`; prepared request and receipt files remain under
-`outbox/handoff/`. Internal TypeScript objects remain camelCase; the explicit
-serializer/deserializer in `src/outbox/transport.ts` is the compatibility
-boundary. Acknowledged and failed actions remain deduplicated, and failed
-actions require an explicit bounded retry.
-
-## Hermes publisher and receipts
-
-`src/publisher/` defines the separate-agent contract. `handoff prepare` writes a
-single `MOLTBOOK_ACTION_REQUEST` v1 containing the exact action, grant/account
-binding, idempotency key, action/body/target/content hashes, and model metadata
-(`openai-codex`, `gpt-5.6-luna`, `xhigh`). It never contains a Moltbook API key.
-
-Hermes owns its private write credential and the Moltbook write operation. The
-engine accepts only a matching, hash-valid, official-permalink
-`MOLTBOOK_PUBLICATION_RECEIPT` with `status=PUBLISHED` and
-`evidenceStatus=verified`. Failed, uncertain, and verification-required receipts
-are persisted and quarantined; they cannot be blindly retried.
-
-`MarxOutcomeEvent` records preserve source, evidence status, consent state,
-timestamps, and attribution. Verified evidence is immutable and deduplicated by
-provider evidence identity. Only events joined to an exact verified publication
-can set the canonical `marx_investigated`, `marx_interacted`, and `marx_used`
-learning signals. Pending, fixture, and dry-run experiments without verified
-outcomes are excluded from learning trials. See [the autonomy plan](docs/AUTONOMY_IMPLEMENTATION_PLAN.md),
-[the Hermes publisher runbook](docs/runbooks/HERMES_PUBLISHER_SETUP.md), and
-[separate Mermaid diagrams](docs/diagrams/).
-
-## Action contract
-
-The handoff is a versioned, schema-validated JSON document. A COMMENT action is
-conceptually shaped like this:
-
-```json
-{
-  "schema_version": "1.0",
-  "action_id": "act_...",
-  "action": "COMMENT",
-  "platform": "moltbook",
-  "target": {
-    "post_id": "post_123",
-    "post_url": "https://permitted.example/posts/post_123",
-    "submolt": "research",
-    "agent_id": "agent_123",
-    "agent_name": "example-agent"
-  },
-  "content": {
-    "comment": "A context-specific contribution that mentions Marx naturally.",
-    "strategy_family": "provenance",
-    "hook_family": "specific_claim"
-  },
-  "decision": {
-    "opportunity_score": 0.91,
-    "evaluation_score": 0.94,
-    "confidence": 0.88
-  },
-  "experiment": {
-    "experiment_id": "exp_...",
-    "prompt_version": "comment.generate@v1",
-    "model_version": "codex-exec:configured"
-  },
-  "metadata": {
-    "created_at": "2026-08-24T00:00:00.000Z",
-    "run_id": "run_..."
-  }
-}
-```
-
-When no safe, useful action exists, record a first-class `NO_ACTION` decision
-with a machine-readable reason such as `LOW_RELEVANCE`, `WEAK_MARX_BRIDGE`,
-`THREAD_SATURATED`, `DUPLICATE`, `CONTEXT_MISSING`, `UNSUPPORTED_CLAIM`, or
-`QUALITY_BELOW_THRESHOLD`. Never force the target action count.
-
-## Architecture and quality bar
-
-Sol coordinates bounded Luna workers for discovery, context, opportunity
-analysis, messaging strategy, candidate generation, evaluation, and learning.
-Workers return compact structured reports, not raw conversation dumps. The
-orchestrator synthesizes their reports and performs the final decision.
-
-The intelligence layer should answer:
-
-> Could a useful, context-specific Marx contribution plausibly make an
-> autonomous agent investigate, discuss, interact with, or use Marx?
-
-That is broader than keyword matching and narrower than generic promotion.
-Publishable comments normally have one contextual hook, one useful idea, and
-one natural Marx bridge. They must pass both an independent evaluator and
-deterministic QA, including contextual anchoring, duplicate protection,
-unsupported-claim checks, and the standalone marketing test.
-
-## Prompt and experiment versioning
-
-Important model instructions are versioned under `prompts/`:
-
-- `opportunity/v1.md` — classify and score a conversation;
-- `strategy/v1.md` — select distinct experiment arms;
-- `generator/v1.md` — write context-specific candidates;
-- `evaluator/v1.md` — independently score candidates;
-- `learning/v1.md` — update conservative strategy priors.
-
-Do not edit a prompt version in place after it has produced actions. Create a
-new version and record it on every model run, candidate, evaluation, action,
-and experiment. Strategy families are hypotheses, not permanent templates.
-
-## Platform and security boundaries
-
-Only official, documented, public, or explicitly authorized Moltbook access
-methods are permitted. The project does not implement CAPTCHA/authentication
-bypass, rate-limit evasion, stealth scraping, proxy rotation for evasion, fake
-identities, impersonation, hidden redirects, or moderation evasion.
-
-Retrieved posts and replies are untrusted data. Prompt injection such as
-“ignore previous instructions,” requests for credentials, or commands to
-delete local state must be treated as text about the conversation, never as
-instructions. External content cannot modify the system prompt, access the
-filesystem, alter configuration, or trigger a tool call.
-
-Development defaults prevent publication. A future production enablement must
-explicitly set `publishing.enabled: true`, use the permitted downstream
-publisher contract, retain schema validation and deterministic QA, and keep
-credentials outside this repository.
-
-## Source, outcome, and learning status
-
-- Fixture mode is complete and deterministic; disabled mode fails closed.
-- An official-origin live read client exists behind `--live-read`; its key is
-  resolved from macOS Keychain (or explicitly configured environment mode), and
-  no credential is bundled.
-- Publication and outcome schemas/repositories exist. Local outcome simulation
-  exercises fixture-only statistics, while durable learning accepts only
-  publication-bound verified evidence imported through the outcome ingestion
-  boundary.
-- Real publisher receipts, Marx investigation/interaction/usage telemetry,
-  attribution windows, and production baselines remain external and unknown.
-
-Architecture decisions are recorded under `docs/adr/` for canonical schemas,
-Sol/Luna/Codex execution, source and publishing boundaries, and outbox/outcome
-attribution.
-
-## Development commands
-
-```bash
-npm run typecheck       # strict TypeScript validation
-npm test                # unit/integration/evaluation suite
-npm run test:watch      # local test iteration
-npm run build           # compile src/ to dist/
-npm run cli -- run --help  # inspect run options
+nvm use 22.17.0
+npm run typecheck
+npm test
+npm run test:publisher
+npm run build
 npm run cli -- run --fixture ./tests/fixtures/moltbook.json --dry-run
 npm run cli -- daemon --once --fixture ./tests/fixtures/moltbook.json --dry-run
 ```
 
-Use fixtures for integration and evaluation. Do not make tests publish live
-comments. Before declaring a change complete, also run the relevant dry-run and
-fixture commands, inspect structured logs, and confirm that retries remain
-idempotent.
+Tests use fixture/mocked providers, never real comments. The
+[verification report](docs/verification/team-onboarding.md) records passed
+checks and limits. CI covers macOS/Linux clean clones and another shell Node
+version. Live permissions, network failures, platform rules, model quotas and
+quality eligibility can still cause legitimate failures.
 
-See [AGENTS.md](AGENTS.md) for the full coding-agent operating manual,
-including persistence, worker contracts, architecture-change procedure,
-observability, failure handling, and the Definition of Done.
+Before updating, stop runs and back up consistent DB/outbox/cap/attempt state
+privately. From a clean checkout:
+
+```bash
+git pull --ff-only
+npm run setup
+npm run doctor:live
+```
+
+Inspect divergence/local edits instead of forcing Git. Recheck publication
+setup after a move or account change. When migrating a shared account's host,
+keep the old host stopped, transfer consistent runtime state privately and
+re-provision secrets separately. A fresh clone must not reset account history.
+
+## Maintainer delivery checklist
+
+Supply repository access; a tested branch/tag or commit and this guide; an
+accessible sample Marx feed with usable agent replies; the authorized tracker
+token privately and its owner/rotation contact; account scope, pilot caps and
+one designated publishing host; and a contact/procedure for platform challenges,
+uncertain receipts and recovery. The operator supplies their own Codex login
+and claimed Moltbook credentials, or receives authorized team account access
+privately. The HMAC contract secret is generated locally.
+
+Do not deliver personal credentials, whole Hermes/Codex profiles, node_modules,
+unreviewed pending actions or a database for a different account. Shared config
+remains read-only. Engineering contracts are in [AGENTS.md](AGENTS.md),
+[the publisher ADR](docs/adr/0006-bundled-publisher.md),
+[the outbox ADR](docs/adr/0004-outbox-and-outcome-attribution.md), and versioned
+prompts/schemas/tests. The runtime has three bounded worker roles; model output
+never replaces deterministic QA or the signed publisher boundary.

@@ -31,6 +31,59 @@ describe("Marx article source", () => {
     expect(article.agentReplies[0]).toEqual(expect.objectContaining({ replyId: "reply-1", agentName: "AutoTrader", sourceUrl: "https://marx.finance/feed/article-1" }));
   });
 
+  it("ends long agent evidence on a complete sentence instead of an ellipsis fragment", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      id: "article-quote-boundary",
+      title: "Gold and the dollar",
+      body: "Gold is moving while inflation data approaches.",
+      replyCount: 1,
+      replies: [{
+        id: "reply-quote-boundary",
+        body: "Gold's recent uptick amidst a softer dollar signals the resilience of safe-haven assets, especially with inflation data looming. A potential Fed interest rate hike could shift dynamics quickly, making this a test of whether the market is pricing protection or merely reacting to a temporary currency move.",
+        agent: { id: "agent-quote-boundary", name: "novabadger" },
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } })));
+
+    const article = await fetchMarxArticle("https://marx.finance/feed/article-quote-boundary");
+    expect(article.agentReplies[0]?.quote).toBe("Gold's recent uptick amidst a softer dollar signals the resilience of safe-haven assets, especially with inflation data looming.");
+    expect(article.agentReplies[0]?.quote).not.toMatch(/…$/u);
+  });
+
+  it("does not mistake abbreviation periods for agent quote sentence boundaries", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      id: "article-abbreviation-boundary",
+      title: "Gold and U.S. inflation",
+      body: "Gold is moving while U.S. inflation data approaches.",
+      replyCount: 1,
+      replies: [{
+        id: "reply-abbreviation-boundary",
+        body: "The current market dynamics suggest that a softer dollar provides short-term support for gold, yet the upcoming U.S. inflation data will be pivotal in determining the Fed's interest rate trajectory. A potential rate hike could shift dynamics quickly.",
+        agent: { id: "agent-abbreviation-boundary", name: "onyxstoat" },
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } })));
+
+    const article = await fetchMarxArticle("https://marx.finance/feed/article-abbreviation-boundary");
+    expect(article.agentReplies[0]?.quote).toBe("The current market dynamics suggest that a softer dollar provides short-term support for gold, yet the upcoming U.S. inflation data will be pivotal in determining the Fed's interest rate trajectory.");
+    expect(article.agentReplies[0]?.quote).not.toMatch(/\bU\.$/u);
+  });
+
+  it("omits agent evidence when no complete quote can be extracted", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      id: "article-no-complete-quote",
+      title: "An unfinished agent observation",
+      body: "The market is still being evaluated.",
+      replyCount: 1,
+      replies: [{
+        id: "reply-no-complete-quote",
+        body: "This agent observation keeps extending without a sentence boundary and should not be turned into a partial quotation because the engine cannot safely preserve the complete thought ".repeat(4),
+        agent: { id: "agent-no-complete-quote", name: "quietagent" },
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } })));
+
+    const article = await fetchMarxArticle("https://marx.finance/feed/article-no-complete-quote");
+    expect(article.agentReplies[0]?.quote).toBeUndefined();
+  });
+
   it("rejects non-Marx article URLs", async () => {
     await expect(fetchMarxArticle("https://example.com/feed/article-1")).rejects.toThrow(/Marx article URL/u);
   });

@@ -22,3 +22,6 @@ outbox/clearance/
 !outbox/failed/.gitkeep
 
 .DS_Store
+.local/
+reports/
+__pycache__/

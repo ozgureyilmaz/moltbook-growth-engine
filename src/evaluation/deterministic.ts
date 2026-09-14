@@ -102,6 +102,7 @@ function quoteGroundedTest(comment: string, context: ConversationContext): boole
   if (articleContext && typeof articleContext === "object" && (articleContext as Record<string, unknown>).quoteMode === "disabled") return true;
   const evidence = articleEvidence(context);
   if (!evidence) return true;
+  if (!evidence.quote) return true;
   const normalizedComment = comment.toLowerCase().replace(/[^a-z0-9\s]/g, " ");
   const normalizedQuote = evidence.quote.toLowerCase().replace(/[^a-z0-9\s]/g, " ");
   const quoteWords = normalizedQuote.split(/\s+/u).filter((word) => word.length > 4);

@@ -13,14 +13,13 @@ function terms(value: string): Set<string> {
 }
 
 export function buildArticleSearchQueries(article: MarxArticle): string[] {
+  const title = article.title.replace(/\s+/gu, " ").trim().slice(0, 220);
+  const labels = [...article.topics, ...article.tickers].join(" ").slice(0, 180);
+  const bodyTerms = [...terms(article.body)].slice(0, 14).join(" ");
   const queries = [
-    "Fed Chair Kevin Warsh inflation interest rate hike",
-    "Warsh rate hike DeFi yield",
-    "FedWatch September 16 rate hike",
-    "Warsh Jackson Hole Fed rate hike",
-    "PCE inflation September Fed decision",
-    "Treasury yields policy repricing growth inflation",
-    `${article.title} ${article.topics.slice(0, 3).join(" ")}`,
+    title,
+    `${title} ${labels}`,
+    `${labels} ${bodyTerms}`,
   ];
   return [...new Set(queries.map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean))];
 }
@@ -40,7 +39,7 @@ export function chooseMarxEvidence(article: MarxArticle, post: MoltbookPost): Ar
     replyId: reply.replyId,
     agentId: reply.agentId,
     agentName: reply.agentName,
-    quote: reply.quote,
+    ...(reply.quote ? { quote: reply.quote } : {}),
     quoteUrl: reply.sourceUrl,
     evidenceStatus: article.evidenceStatus === "complete" ? "complete" : "partial",
   };
@@ -52,13 +51,10 @@ export function rankRelatedPosts(article: MarxArticle, posts: MoltbookPost[]): R
     .map((post) => {
       const postTerms = terms(`${post.content} ${post.submolt}`);
       const matchedTerms = [...postTerms].filter((term) => sourceTerms.has(term));
-      const topicBoost = /finance|trading|economics|markets|science/i.test(post.submolt) ? 0.14 : 0;
-      const directHits = (post.content.match(/warsh|federal reserve|inflation|interest rate|rate hike|pce|treasury|yield|fomc|fedwatch/gi) ?? []).length;
-      const directBoost = Math.min(0.45, directHits * 0.1);
-      const score = Math.min(1, matchedTerms.length / 20 + topicBoost + directBoost);
-      return { post, score, matchedTerms: matchedTerms.slice(0, 12), directHits };
+      const score = Math.min(1, matchedTerms.length / Math.max(1, Math.min(20, sourceTerms.size)));
+      return { post, score, matchedTerms: matchedTerms.slice(0, 12) };
     })
-    .filter((item) => item.score >= 0.2 && item.directHits > 0)
+    .filter((item) => item.score >= 0.2 && item.matchedTerms.length >= 2)
     .sort((left, right) => right.score - left.score || left.post.postId.localeCompare(right.post.postId));
 }
 

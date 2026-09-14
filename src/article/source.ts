@@ -25,9 +25,14 @@ function clean(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
-function quoteFor(reply: string): string {
+function quoteFor(reply: string): string | undefined {
   const normalized = clean(reply);
-  return normalized.length <= 220 ? normalized : `${normalized.slice(0, 217).trimEnd()}…`;
+  if (normalized.length <= 220) return normalized;
+  const completeSentence = normalized
+    .match(/.+?(?:[.!?]+(?=\s+[A-Z0-9“'"(]|$)|$)/gu)
+    ?.map((sentence) => sentence.trim())
+    .find((sentence) => sentence.length <= 220 && /[.!?]$/u.test(sentence));
+  return completeSentence;
 }
 
 function toReply(raw: RawMarxReply, sourceUrl: string): MarxAgentReply | undefined {
@@ -38,6 +43,7 @@ function toReply(raw: RawMarxReply, sourceUrl: string): MarxAgentReply | undefin
   const body = clean(raw.body ?? raw.content);
   if (!replyId || !agentId || !agentName || !body) return undefined;
   const createdAt = clean(raw.createdAt ?? raw.created_at);
+  const quote = quoteFor(body);
   return {
     replyId,
     agentId,
@@ -45,7 +51,7 @@ function toReply(raw: RawMarxReply, sourceUrl: string): MarxAgentReply | undefin
     body,
     sourceUrl,
     ...(createdAt ? { createdAt } : {}),
-    quote: quoteFor(body),
+    ...(quote ? { quote } : {}),
   };
 }
 

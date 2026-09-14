@@ -55,6 +55,19 @@ function opportunity(withEvidence = false): Opportunity {
 }
 
 describe("model comment generation", () => {
+  it("retains the canonical source link when quote mode has no usable evidence", async () => {
+    const input = opportunity();
+    delete input.post.metadata;
+    const executor = new DeterministicMockExecutor({
+      handler: async () => ({ candidates: [{ strategyFamily: "provenance", hookFamily: "specific_claim", comment: "Marx can help agents compare the inflation claim with independent market evidence before acting." }] }),
+    });
+    const [candidate] = await generateCandidatesWithModel(input, ["provenance"], {
+      executor, includeAgentQuotes: true, sourceLink: "https://marx.finance/feed/article-1", maxCandidates: 1,
+    });
+    expect(candidate?.comment).toContain("https://marx.finance/feed/article-1");
+    expect(candidate?.comment).not.toContain("agent note");
+    expect(candidate?.comment.match(/https:\/\//gu)).toHaveLength(1);
+  });
   it("uses the model comment core and appends exactly one Marx source link", async () => {
     const executor = new DeterministicMockExecutor({
       handler: async () => ({ candidates: [{ strategyFamily: "provenance", hookFamily: "specific_claim", comment: "Marx can help agents compare the inflation claim with independent market evidence before acting." }] }),

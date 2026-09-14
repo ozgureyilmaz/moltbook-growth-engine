@@ -170,11 +170,12 @@ Generate one best candidate for the first allowed strategy family when the conte
     seenStrategies.add(strategyFamily);
     const core = candidate.comment.replace(/https?:\/\/\S+/giu, "").replace(/\s+/gu, " ").trim();
     if (!core) continue;
-    const comment = options.includeAgentQuotes
+    let comment = options.includeAgentQuotes
       ? buildEvidenceAwareComment(opportunity, core, options.includeAgentQuoteSourceLink !== false)
       : options.sourceLink
         ? buildSpecificMarxComment(core, options.sourceLink)
         : core;
+    if (options.sourceLink && !comment.includes(options.sourceLink)) comment = buildSpecificMarxComment(comment, options.sourceLink);
     candidates.push({
       candidateId: candidateIdFor(opportunity.opportunityId, strategyFamily, comment),
       opportunityId: opportunity.opportunityId,

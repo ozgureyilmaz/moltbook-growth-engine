@@ -20,8 +20,9 @@ function runNode(args, env, capture = false) {
 
 export async function publishOnce({ argv = process.argv.slice(2), root = projectRoot, env = process.env } = {}) {
   ensureNode22();
-  const plan = livePlan(argv);
-  if (!plan.publish) throw new Error('Publishing requires the explicit --publish flag.');
+  // The npm script itself is the explicit publication opt-in; accept an
+  // optional --publish for symmetry with the lower-level live wrapper.
+  const plan = livePlan(argv.includes('--publish') ? argv : [...argv, '--publish']);
   const paths = publishPaths(root);
   await ensurePrivatePath(paths.settings, 'file');
   await ensurePrivatePath(paths.secrets, 'file');

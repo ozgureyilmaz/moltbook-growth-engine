@@ -5,6 +5,9 @@ import { MoltbookHttpClient } from "../../src/discovery";
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe("live preflight failure boundary", () => {
+  it("rejects publication with mock evaluation before any source or publisher call", async () => {
+    await expect(runCli(["marx-specific-cycle", "--article-url", "https://marx.finance/feed/test", "--publish", "--real-model=false"], { persistence: {}, stdout: () => undefined })).rejects.toThrow("Publication requires --real-model");
+  });
   it("fails the CLI when a model smoke fails without --autonomous", async () => {
     const output: string[] = [];
     await expect(runCli(["doctor", "--model-smoke"], {

@@ -24,3 +24,4 @@ outbox/clearance/
 .DS_Store
 .local/
 reports/
+__pycache__/

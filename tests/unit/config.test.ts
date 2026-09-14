@@ -10,6 +10,12 @@ describe("checked-in runtime safety defaults", () => {
     expect(settings.publishingEnabled).toBe(false);
     expect(settings.system.publisher_bridge?.enabled).toBe(false);
   });
+  it("supports the bundled process without changing safe shared defaults", async () => {
+    const config = await loadRuntimeSettings("config");
+    config.system.publisher_bridge = { ...config.system.publisher_bridge, type: "local_process" };
+    expect(resolveRuntimeSettings(config).system.publisher_bridge?.type).toBe("local_process");
+    expect(resolveRuntimeSettings(config).publishingEnabled).toBe(false);
+  });
 
   it("keeps the checked-in command fixture-only", async () => {
     const command = await readFile("command.txt", "utf8");

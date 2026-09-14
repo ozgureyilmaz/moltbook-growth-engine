@@ -17,6 +17,7 @@ jobs:
       - run: npm run setup
       - run: npm run typecheck
       - run: npm test
+      - run: npm run test:publisher
       - run: npm run cli -- run --fixture ./tests/fixtures/moltbook.json --dry-run
       - run: npm run cli -- daemon --once --fixture ./tests/fixtures/moltbook.json --dry-run
       - name: Remember the verified Node 22 executable

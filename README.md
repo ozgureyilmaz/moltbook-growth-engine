@@ -29,7 +29,7 @@ that will own production publication.
 | Fixture smoke | Uses checked-in sample posts and deterministic mock evaluation. No platform or model calls. | Node 22 and dependencies. |
 | Public live drafts (`npm run live`) | Reads a Marx article and public Moltbook search/context, generates and evaluates with real models, writes Markdown/JSON reports. No tracker writes or publication. | Node 22, dependencies, authenticated Codex CLI and access to the configured model. No Moltbook key or Hermes required. |
 | Authorized source rehearsal (`run --live-read --dry-run`) | Reads through the authenticated Moltbook source adapter. | Also requires the Moltbook read key. Add `--real-model` for actual model evaluation. |
-| Production publish | Creates production tracker distributions, prepares signed handoff files, and invokes the external publisher. | Everything in dry-run plus production config, tracker token, publisher contract secret, Hermes publisher, valid clearance, and provider read-back. |
+| Production publish (`npm run publish`) | Creates tracker distributions and invokes the bundled deterministic publisher with a signed handoff and exact read-back. | Setup below, Python 3, your claimed Moltbook account key, and an authorized team tracker token. Hermes is optional. |
 
 Cloning the GitHub repository gives you the code and checked-in safe defaults.
 It does not give you API keys, the local SQLite database, the production
@@ -40,10 +40,10 @@ configuration, the Hermes installation, or any other operator-machine state.
 Prerequisites: access to this GitHub repository, Git, and a Node version manager
 such as [nvm](https://github.com/nvm-sh/nvm#installing-and-updating). The supported
 Node major is 22; `.nvmrc` pins the tested baseline to 22.17.0. Package installation
-rejects other majors because the SQLite addon must match the Node ABI. macOS is
-the current publisher platform. The public draft path is suitable for macOS and
-Linux; the CI matrix covers both. Native Windows publishing is not supported by
-the current external Keychain-based publisher.
+rejects other majors because the SQLite addon must match the Node ABI. macOS and
+Linux are supported by the bundled publisher and public draft path; the CI
+matrix covers both. Native Windows publishing is not supported by the current
+POSIX-locking publisher. Legacy external Keychain publishing requires macOS.
 
 ```bash
 git clone https://github.com/ozgureyilmaz/moltbook-growth-engine.git
@@ -122,6 +122,86 @@ attempt per model task. Additional advisory model calls are disabled; actual
 generation, independent evaluation and deterministic QA still run. A full run
 can take several minutes across targets; the call deadline is not a total-run
 deadline. Failures do not fall back to mock comments.
+
+## Publish comments after cloning
+
+Complete `npm run setup` and Codex authentication first. Publication is supported
+on macOS and Linux with Python 3 and local POSIX filesystem locking. The reviewed
+publisher code is included at `integrations/moltbook-publisher/publish.py`; no
+files from the original developer's computer are required.
+
+Before configuring publication, obtain:
+
+1. **Your Moltbook agent account and API key.** Finish the official account claim
+   process. The configured name must exactly match the account returned by the
+   official `/agents/me` endpoint; `/agents/status` must report `claimed`.
+   Follow the [official Moltbook instructions](https://www.moltbook.com/skill.md)
+   for registration/claim. Do not use someone else's key or paste keys into chat.
+2. **An authorized Marx tracker API token from the team owning the tracker.**
+   Cloning this engine does not grant access to
+   `https://marx-tracker.marxx.workers.dev`. The current tracked publishing flow
+   requires that service; it does not substitute a direct source link when
+   tracker access is unavailable. Public live drafts remain available without it.
+3. **Python 3 available as `python3`.** No third-party Python packages are needed
+   by the bundled publisher. Node 22 and Codex access are required as above.
+
+One-time setup from the clone:
+
+```bash
+npm run setup:publish -- --account YOUR_CLAIMED_MOLTBOOK_AGENT
+```
+
+The terminal securely prompts for missing credentials and creates a fresh random
+contract-signing secret. They are stored only in ignored `.local/publish/` with
+restricted filesystem permissions. Dedicated local publish configuration is
+created there; shared `config/system.yaml` stays publishing-disabled. Existing
+operator setup is not overwritten. Setup prepares local files only: it does not
+register an account, post a comment or schedule a task. Keep the whole local
+directory private and do not share its secret file in a bug report.
+
+Run an explicit one-shot publication, starting with a one-action pilot:
+
+```bash
+npm run publish -- \
+  --article-url "https://marx.finance/feed/FEED_ID" \
+  --actions 1
+```
+
+**Use `npm run publish`, not `npm publish`.** The latter is npm's package-release
+command. The first is this project's deliberate opt-in to platform publication.
+The wrapper loads the local configuration and secrets automatically, checks the
+claimed publisher identity and runtime dependencies, creates a short-lived
+signed clearance, then runs the existing real-model/QA/tracker workflow. It
+re-engages the kill switch on completion or handled failure. No model rewrites
+an approved comment at the publisher boundary. Existing pending actions or
+unresolved attempts block a new run until an operator reconciles them.
+
+The default pilot requests one action. After a verified pilot, increase to
+`--actions 5` if appropriate. The existing workflow requires the complete
+requested batch before handoff; if fewer candidates qualify, it publishes none.
+The bundled publisher receives only the action IDs from this run, never an
+unbounded scan-and-publish instruction. Caps and cooldowns are stored locally
+across invocations. An interrupted or uncertain write cannot be silently retried.
+
+Publication is reported as successful only after exact content, account and
+provider comment ID read-back passes and the signed receipt is imported. If
+Moltbook requests platform verification, the result stays unverified; this
+integration does not solve or bypass that challenge. Check the report/receipt
+and follow the platform's authorized process before treating it as published.
+Local tests and successful setup do not establish that a new account can publish.
+
+### Optional Hermes use
+
+Hermes is no longer required for one-shot publication. If the team already uses
+Hermes, have it execute the same `npm run publish -- --article-url ...` command
+from this clone on the designated publishing host. Keep secrets out of the
+Hermes prompt; the wrapper loads them locally. Install scheduling only after a
+verified pilot and an explicit scheduling decision. Do not run both a legacy
+outbox consumer and this command concurrently for the same account.
+
+The older `setup:hermes`, `hermes_outbox` and Keychain instructions below remain
+available for existing external publisher installations. New users should use
+`setup:publish` and `publish`; they do not need to copy an external skill package.
 
 ## Reading results and operating as a team
 
@@ -260,6 +340,10 @@ configure.
 
 ## Machine-local secrets
 
+New `setup:publish` users follow the hidden-prompt flow above and do not need
+the legacy Keychain steps in this section. Their secrets are loaded privately
+from `.local/publish/` by the `publish` wrapper.
+
 Never commit secret values. The default macOS Keychain references used by this
 repository are:
 
@@ -326,6 +410,9 @@ outbox. A successful live-read check is not production-publish authorization.
 
 ## Production setup is separate from the clone
 
+For new users, `npm run setup:publish` creates the dedicated local production
+configuration. This section describes the manual/legacy equivalent.
+
 The checked-in `config/system.yaml` is intentionally safe:
 
 - `source.mode: live_read_only`;
@@ -373,10 +460,10 @@ operator must deliberately review activation and the three gates above.
 
 ## External Hermes publisher
 
-The GitHub clone does not contain the Hermes publisher, its Python script, its
-private Moltbook write credential, its publisher config, or its local lock/cap
-state. The publisher must be installed and configured separately on the
-machine that owns the Moltbook account.
+This section is for legacy external `hermes_outbox` installations. New users
+can use the bundled `local_process` publisher with `setup:publish` above.
+The clone never includes credentials, local publisher config or lock/cap state.
+An existing external Hermes skill can still be configured separately.
 
 Recommended arrangement: install Hermes normally on the publishing Mac and
 transfer only the reviewed `moltbook-deterministic-publisher` skill directory

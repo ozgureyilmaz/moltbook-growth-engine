@@ -18,6 +18,9 @@
     "AGENTS.md"
   ],
   "scripts": {
+    "setup:publish": "node scripts/setup-publish.mjs",
+    "publish": "node scripts/publish.mjs",
+    "test:publisher": "python3 -m unittest discover -s integrations/moltbook-publisher -p 'test_*.py'",
     "setup": "node scripts/setup.mjs",
     "setup:hermes": "node scripts/setup-hermes.mjs",
     "doctor:live": "node scripts/doctor-live.mjs",

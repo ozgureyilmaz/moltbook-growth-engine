@@ -359,9 +359,11 @@ async function writeSpecificCycleOutput(
   return records;
 }
 
-async function runConfiguredPublisher(options: Record<string, string | boolean>): Promise<string> {
+async function runConfiguredPublisher(options: Record<string, string | boolean>, configValue: RuntimeConfig, actionIds: string[]): Promise<string> {
   const { python, script, config } = publisherRuntime(options);
-  const result = await execFileAsync(python, [script, "--config", config], { encoding: "utf8", timeout: 240_000, maxBuffer: 2 * 1024 * 1024, env: { ...process.env, MARX_GROWTH_NODE: process.execPath } });
+  const scoped = configValue.publisher_bridge?.type === "local_process" ? actionIds.flatMap((id) => ["--action-id", id]) : [];
+  if (configValue.publisher_bridge?.type === "local_process" && actionIds.length === 0) throw new Error("Publisher invocation requires explicit action IDs");
+  const result = await execFileAsync(python, [script, "--config", config, ...scoped], { encoding: "utf8", timeout: 240_000, maxBuffer: 2 * 1024 * 1024, env: { ...process.env, MARX_GROWTH_NODE: process.execPath } });
   return result.stdout.trim();
 }
 
@@ -448,12 +450,12 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       const bridge = config.publisher_bridge;
       runners.push(async () => ({
         name: "publisher-contract",
-        status: bridge?.provider === "openai-codex" && bridge.model === "gpt-5.6-luna" && bridge.reasoning_effort === "xhigh" ? (bridge.enabled ? "PASS" : "WARN") : "FAIL",
-        message: bridge?.enabled ? "Hermes publisher contract is enabled" : "Hermes publisher contract is configured but disabled",
+        status: (bridge?.type === "local_process" || (bridge?.provider === "openai-codex" && bridge.model === "gpt-5.6-luna" && bridge.reasoning_effort === "xhigh")) ? (bridge.enabled ? "PASS" : "WARN") : "FAIL",
+        message: bridge?.enabled ? "Publisher contract is enabled" : "Publisher contract is configured but disabled",
         checkedAt: checkedAt.toISOString(),
         metadata: { provider: bridge?.provider, model: bridge?.model, reasoningEffort: bridge?.reasoning_effort, enabled: bridge?.enabled === true },
       }));
-      runners.push(async () => commandHealthCheck("hermes-gateway", bridge?.binary ?? "hermes", ["gateway", "status"], checkedAt));
+      if (bridge?.type !== "local_process") runners.push(async () => commandHealthCheck("hermes-gateway", bridge?.binary ?? "hermes", ["gateway", "status"], checkedAt));
       const runtime = publisherRuntime(parsed.options);
       runners.push(async () => commandHealthCheck("publisher-python", runtime.python, ["--version"], checkedAt));
       runners.push(async () => {
@@ -626,9 +628,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         grant: verifiedGrant,
         publisherAccount,
         publisher: {
-          provider: config.publisher_bridge?.provider ?? "openai-codex",
-          model: config.publisher_bridge?.model ?? "gpt-5.6-luna",
-          reasoningEffort: config.publisher_bridge?.reasoning_effort ?? "xhigh",
+          provider: config.publisher_bridge?.type === "local_process" ? "local-process" : config.publisher_bridge?.provider ?? "openai-codex",
+          model: config.publisher_bridge?.type === "local_process" ? "bundled-python-v1" : config.publisher_bridge?.model ?? "gpt-5.6-luna",
+          reasoningEffort: config.publisher_bridge?.type === "local_process" ? "none" : config.publisher_bridge?.reasoning_effort ?? "xhigh",
         },
       });
       const result = await handoff.writeRequest(request);
@@ -697,6 +699,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     const includeAgentQuotes = booleanOption(parsed.options["with-agent-quotes"]) === true && booleanOption(parsed.options["no-agent-quotes"]) !== true;
     const specificEvaluationMode = evaluationModeOption(parsed.options) ?? "deterministic_mock";
     const publish = booleanOption(parsed.options.publish) === true;
+    if (publish && specificEvaluationMode !== "real_model") throw new CliExecutionError("Publication requires --real-model; mock evaluation cannot publish");
     const trackingEnvironment = publish ? "production" as const : "development" as const;
     if (publish) {
       assertAutonomousConfiguration(settings, selectedSourceMode);
@@ -784,7 +787,12 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       }
       const productionOutbox = gatedProductionOutbox(config, settings, killSwitchFor(config));
       for (const action of result.actions) await productionOutbox.enqueue(action);
-      await runConfiguredPublisher(parsed.options);
+      try {
+        await runConfiguredPublisher(parsed.options, config, result.actions.map((action) => action.actionId));
+      } catch {
+        await writeSpecificCycleOutput(outputPath, result, persistence, true, includeAgentQuotes);
+        throw new CliExecutionError(`Publisher failed or returned unverified results; inspect ${outputPath} and outbox receipts before retrying`, result.summary.runId);
+      }
     }
     const records = publish
       ? await writeSpecificCycleOutput(outputPath, result, persistence, publish, includeAgentQuotes)

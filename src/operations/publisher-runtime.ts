@@ -20,7 +20,8 @@ export async function checkPublisherFiles(runtime: ReturnType<typeof publisherRu
   try { raw = JSON.parse(await readFile(runtime.config, "utf8")) as unknown; } catch { throw new Error("Publisher config is missing, unreadable, or invalid JSON. Run npm run setup:hermes."); }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Publisher config must be an object");
   const value = raw as Record<string, unknown>;
-  for (const key of ["account", "credential_service", "credential_account", "contract_keychain_service", "contract_keychain_account", "contract_key_id"]) {
+  const environmentSecrets = value.secret_provider === "environment";
+  for (const key of environmentSecrets ? ["account", "api_key_environment_variable", "contract_secret_environment_variable", "contract_key_id"] : ["account", "credential_service", "credential_account", "contract_keychain_service", "contract_keychain_account", "contract_key_id"]) {
     if (typeof value[key] !== "string" || !value[key].trim()) throw new Error(`Publisher config is missing ${key}`);
   }
   for (const [key, expected] of [
@@ -34,6 +35,10 @@ export async function checkPublisherFiles(runtime: ReturnType<typeof publisherRu
   }
   if (!Array.isArray(value.allowed_domains) || value.allowed_domains.length !== 1 || value.allowed_domains[0] !== "www.moltbook.com") throw new Error("Publisher allowed_domains must contain only www.moltbook.com");
   if (value.contract_key_id !== (config.publisher_bridge?.contract_key_id ?? "contract-v1")) throw new Error("Publisher contract key ID does not match the engine");
+  if (environmentSecrets) {
+    if (config.publisher_bridge?.contract_secret_provider !== "environment" || value.contract_secret_environment_variable !== (config.publisher_bridge?.contract_secret_environment_variable ?? "MOLTBOOK_PUBLISHER_CONTRACT_SECRET")) throw new Error("Publisher contract environment reference does not match the engine");
+    return;
+  }
   for (const [key, expected] of [
     ["contract_keychain_service", config.publisher_bridge?.contract_keychain_service ?? "marx-moltbook-growth-engine"],
     ["contract_keychain_account", config.publisher_bridge?.contract_keychain_account ?? "publisher-contract"],

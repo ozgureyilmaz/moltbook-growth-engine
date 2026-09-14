@@ -1,5 +1,11 @@
 # Hermes Publisher Setup
 
+**New users:** the repository now includes a standalone publisher. Follow
+[Publish comments after cloning](../../README.md#publish-comments-after-cloning)
+using `npm run setup:publish` and `npm run publish`; no external skill copy is
+required. Hermes can optionally execute that one-shot command. The remainder
+of this runbook applies only to legacy external `hermes_outbox` installations.
+
 Use this runbook on the single machine designated to publish for a claimed
 Moltbook account. Public draft generation via `npm run live` does not require
 Hermes. The external publisher owns the write credential and exact platform
@@ -29,8 +35,9 @@ Install it under the operator's
 explicit script path below. Record its version/hash alongside the engine commit.
 Do not replace it with a generic model prompt that posts comments.
 
-This repository does not distribute that external Python publisher. Without the
-reviewed package, live drafts work but production publishing is not ready.
+This repository does not install that legacy external Python skill. Without it,
+legacy Hermes publication is unavailable; the bundled `local_process` path
+remains available through `setup:publish`.
 Review the package for machine-specific paths before transferring it. The legacy
 script accepts `MARX_GROWTH_NODE`; the engine and generated environment pin this
 to the active Node 22 executable. Its internal PATH may still be operator-specific;

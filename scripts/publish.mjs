@@ -35,9 +35,14 @@ export async function publishOnce({ argv = process.argv.slice(2), root = project
   const runtimeEnv = { ...env, MARX_GROWTH_CONFIG_DIR: settings.config_directory, MARX_GROWTH_DB: settings.engine.database_path, MOLTBOOK_API_KEY: secrets.MOLTBOOK_API_KEY, MARX_TRACKER_API_TOKEN: secrets.MARX_TRACKER_API_TOKEN, MOLTBOOK_PUBLISHER_CONTRACT_SECRET: secrets.MOLTBOOK_PUBLISHER_CONTRACT_SECRET, MOLTBOOK_PUBLISHER_CONFIG: publisher.config, MOLTBOOK_PUBLISHER_SCRIPT: publisher.script, MOLTBOOK_PUBLISHER_PYTHON: publisher.python, MARX_GROWTH_NODE: process.execPath };
   let success = false;
   try {
-    runNode([cliPath, 'doctor', '--public-read', '--model-smoke', '--live-read', '--publisher', '--autonomous'], runtimeEnv);
+    // The default kill switch is engaged. Run non-autonomous checks first;
+    // clear a fresh signed window only after identity/config/source checks pass.
+    runNode([cliPath, 'doctor', '--public-read', '--model-smoke', '--live-read', '--publisher'], runtimeEnv);
+    const identity = spawnSync(publisher.python, [publisher.script, '--config', publisher.config, '--check'], { cwd: projectRoot, env: runtimeEnv, stdio: 'inherit' });
+    if (identity.error || identity.status !== 0) throw new Error('Publisher identity check failed; no publication attempted');
     runNode([cliPath, 'ops', 'kill-clearance-create', '--output', join(paths.directory, 'clearance.json'), '--minutes', '30', '--reason', 'bounded operator-approved publication pilot', '--actor', settings.account], runtimeEnv);
     runNode([cliPath, 'ops', 'kill-clear', '--clearance', join(paths.directory, 'clearance.json')], runtimeEnv);
+    runNode([cliPath, 'doctor', '--autonomous', '--publisher', '--model-smoke', '--live-read'], runtimeEnv);
     runNode([cliPath, ...plan.run], runtimeEnv);
     success = true;
   } finally {

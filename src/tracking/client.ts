@@ -20,6 +20,9 @@ const FinalizeResponseSchema = z.object({
   actionId: z.string().trim().min(1),
   experimentId: z.string().trim().min(1),
   commentHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  publishedPostId: z.string().trim().min(1).optional(),
+  publishedPostUrl: z.string().url().optional(),
 }).strict();
 
 const SummaryResponseSchema = z.object({
@@ -36,25 +39,37 @@ const RevokeResponseSchema = z.object({
   status: z.literal("revoked"),
 }).strict();
 
-export type TrackerCreateRequest = {
+type TrackerCreateRequestBase = {
   ref: string;
   preLinkIdentity: string;
   destinationUrl: string;
   platform: "moltbook";
-  contentType: "comment";
   feedId: string;
-  sourcePostId: string;
-  sourceUrl: string;
   runId: string;
   opportunityId: string;
   candidateId: string;
   idempotencyKey: string;
 };
 
+export type TrackerCreateRequest = TrackerCreateRequestBase & ({
+  contentType: "comment";
+  sourcePostId: string;
+  sourceUrl: string;
+  targetSubmolt?: string;
+} | {
+  contentType: "post";
+  targetSubmolt: string;
+  sourcePostId?: never;
+  sourceUrl?: never;
+});
+
 export type TrackerFinalizeRequest = {
   actionId: string;
   experimentId: string;
-  commentHash: string;
+  commentHash?: string;
+  contentHash?: string;
+  publishedPostId?: string;
+  publishedPostUrl?: string;
 };
 
 export type TrackerCreateResponse = z.infer<typeof CreateResponseSchema>;
@@ -123,6 +138,7 @@ export class MarxTrackerHttpClient implements MarxTrackerClient {
   }
 
   public async finalizeDistribution(ref: string, input: TrackerFinalizeRequest): Promise<TrackerFinalizeResponse> {
+    if (!input.commentHash && !input.contentHash) throw new Error("tracker finalization requires commentHash or contentHash");
     const response = await this.request("PATCH", `/v1/distributions/${encodeURIComponent(RefSchema.parse(ref))}/finalize`, input, [200]);
     const parsed = FinalizeResponseSchema.parse(response.body);
     if (parsed.ref !== ref || parsed.actionId !== input.actionId || parsed.experimentId !== input.experimentId || parsed.commentHash !== input.commentHash) {

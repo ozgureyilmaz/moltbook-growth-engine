@@ -1,8 +1,8 @@
-import type { ActionPayload, EvaluationResult, GeneratedCandidate, NoActionDecision, Opportunity } from "../orchestrator/contracts";
+import type { ActionPayload, EvaluationResult, GeneratedCandidate, NoActionDecision, Opportunity, PostActionPayload, PublisherActionPayload } from "../orchestrator/contracts";
 import { actionIdFor, experimentIdFor, noActionIdFor } from "../domain/identifiers";
-import { ActionSchema, validateActionSecurity, type ActionSecurityOptions } from "../schemas";
+import { ActionSchema, PostActionSchema, validateActionSecurity, type ActionSecurityOptions } from "../schemas";
 
-export type OutboxPayload = ActionPayload | NoActionDecision;
+export type OutboxPayload = PublisherActionPayload | NoActionDecision;
 
 export function makeActionPayload(
   runId: string,
@@ -69,6 +69,20 @@ export function parseActionPayload(value: unknown, options: ActionSecurityOption
   const result = validateActionSecurity(value, options);
   if (!result.success) throw result.error;
   return result.data as unknown as OutboxPayload;
+}
+
+export function parsePublisherActionPayload(value: PublisherActionPayload, options?: ActionSecurityOptions): PublisherActionPayload;
+export function parsePublisherActionPayload(value: unknown, options?: ActionSecurityOptions): OutboxPayload;
+export function parsePublisherActionPayload(value: unknown, options: ActionSecurityOptions = { mode: "dry-run" }): OutboxPayload {
+  if (value && typeof value === "object" && "action" in value && (value as { action?: unknown }).action === "POST") {
+    const parsed = PostActionSchema.safeParse(value);
+    if (!parsed.success) throw parsed.error;
+    if (options.mode === "production" && !(options.allowedDomains ?? []).includes("www.moltbook.com")) {
+      throw new Error("production post publishing requires the official Moltbook allow-list");
+    }
+    return parsed.data;
+  }
+  return parseActionPayload(value, options);
 }
 
 export { ActionSchema };

@@ -64,6 +64,26 @@ export const CommentActionSchema = z
   })
   .strict();
 
+export const PostActionSchema = z
+  .object({
+    schemaVersion: z.string().trim().min(1),
+    actionId: IdSchema,
+    action: z.literal("POST"),
+    platform: z.literal("moltbook"),
+    target: z.object({ submolt: z.string().trim().min(1) }).strict(),
+    content: z.object({
+      title: z.string().trim().min(1).max(300),
+      content: z.string().trim().min(1).max(40000),
+      type: z.literal("text"),
+    }).strict(),
+    decision: ActionDecisionSchema,
+    experiment: ExperimentReferenceSchema,
+    metadata: z
+      .object({ createdAt: IsoDateSchema, runId: IdSchema })
+      .and(MetadataSchema),
+  })
+  .strict();
+
 export const NoActionSchema = z
   .object({
     schemaVersion: z.string().trim().min(1),
@@ -84,6 +104,7 @@ export type CommentContent = z.infer<typeof CommentContentSchema>;
 export type ActionDecision = z.infer<typeof ActionDecisionSchema>;
 export type ExperimentReference = z.infer<typeof ExperimentReferenceSchema>;
 export type CommentAction = z.infer<typeof CommentActionSchema>;
+export type PostAction = z.infer<typeof PostActionSchema>;
 export type NoAction = z.infer<typeof NoActionSchema>;
 export type Action = z.infer<typeof ActionSchema>;
 export const ActionPayloadSchema = CommentActionSchema;

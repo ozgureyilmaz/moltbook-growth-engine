@@ -1,8 +1,8 @@
 import { link, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
-import type { NoActionDecision, ActionPayload } from "../orchestrator/contracts";
-import { parseActionPayload, type OutboxPayload } from "./payload";
+import type { NoActionDecision, PublisherActionPayload } from "../orchestrator/contracts";
+import { parsePublisherActionPayload, type OutboxPayload } from "./payload";
 import type { ActionSecurityOptions } from "../schemas";
 import { actionIdempotencyKey, commentHash } from "../domain/identifiers";
 import { parseActionTransport, serializeActionTransport } from "./transport";
@@ -51,8 +51,8 @@ export class LocalOutbox {
     await Promise.all([mkdir(this.pendingDir, { recursive: true }), mkdir(this.acknowledgedDir, { recursive: true }), mkdir(this.failedDir, { recursive: true }), mkdir(this.quarantineDir, { recursive: true })]);
   }
 
-  public async enqueue(payload: ActionPayload | NoActionDecision): Promise<{ written: boolean; filePath: string }> {
-    const parsed = parseActionPayload(payload, this.options);
+  public async enqueue(payload: PublisherActionPayload | NoActionDecision): Promise<{ written: boolean; filePath: string }> {
+    const parsed = parsePublisherActionPayload(payload, this.options);
     safeActionId(parsed.actionId);
     if (this.options.mode === "production") {
       if (!this.options.productionGate) throw new Error("production outbox requires an explicit kill-switch gate");
@@ -82,7 +82,7 @@ export class LocalOutbox {
       updatedAt: parsed.metadata.createdAt,
       idempotencyKey: actionIdempotencyKey(parsed),
       runId: parsed.metadata.runId,
-      ...(parsed.target?.postId ? { sourcePostId: parsed.target.postId } : {}),
+      ...(parsed.target && "postId" in parsed.target && parsed.target.postId ? { sourcePostId: parsed.target.postId } : {}),
       ...(parsed.action === "COMMENT" ? { experimentId: parsed.experiment.experimentId, contentHash: commentHash(parsed.content.comment) } : {}),
     });
     return { written: true, filePath };
@@ -202,7 +202,7 @@ export class LocalOutbox {
       updatedAt: payload.metadata.createdAt,
       idempotencyKey: actionIdempotencyKey(payload),
       runId: payload.metadata.runId,
-      ...(payload.target?.postId ? { sourcePostId: payload.target.postId } : {}),
+      ...(payload.target && "postId" in payload.target && payload.target.postId ? { sourcePostId: payload.target.postId } : {}),
       ...(payload.action === "COMMENT" ? { experimentId: payload.experiment.experimentId, contentHash: commentHash(payload.content.comment) } : {}),
     };
     await this.writeState(this.statePath(payloadPath), state);

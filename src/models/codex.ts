@@ -63,6 +63,10 @@ export type CodexExecExecutorOptions = ExecutorLimits & {
   clock?: () => Date;
 };
 
+export function resolveCodexBinary(options: Pick<CodexExecExecutorOptions, "binary" | "env"> = {}): string {
+  return options.binary ?? (options.env ?? process.env).MARX_GROWTH_CODEX_BIN ?? "codex";
+}
+
 /** Executes structured tasks through the user's authenticated Codex CLI session. */
 export class CodexExecExecutor implements ModelExecutor {
   private readonly binary: string;
@@ -85,7 +89,7 @@ export class CodexExecExecutor implements ModelExecutor {
   private readonly waiters: Array<() => void> = [];
 
   public constructor(options: CodexExecExecutorOptions = {}) {
-    this.binary = options.binary ?? "codex";
+    this.binary = resolveCodexBinary(options);
     this.cwd = options.cwd;
     this.model = options.model ?? "gpt-5.6-luna";
     this.modelVersion = options.modelVersion ?? this.model;

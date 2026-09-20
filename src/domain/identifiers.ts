@@ -72,11 +72,23 @@ export function commentHash(comment: string): string {
   return sha256(normalizeText(comment));
 }
 
+export function postBodyHash(title: string, content: string): string {
+  return sha256(stableStringify({ title: normalizeText(title), content: normalizeText(content) }));
+}
+
 export function actionIdFor(postId: string, comment: string, strategyFamily: string): string {
   return deterministicId("act", {
     postId: normalizeText(postId),
     commentHash: commentHash(comment),
     strategyFamily: normalizeText(strategyFamily),
+  });
+}
+
+export function postActionIdFor(submolt: string, title: string, content: string): string {
+  return deterministicId("post", {
+    submolt: normalizeText(submolt),
+    titleHash: commentHash(title),
+    contentHash: commentHash(content),
   });
 }
 
@@ -98,12 +110,15 @@ export function modelRunIdFor(runId: string, taskId: string, attempt: number): s
 
 export function actionIdempotencyKey(action: {
   action: string;
-  target?: { postId?: string };
-  content?: { comment?: string };
+  target?: { postId?: string; submolt?: string };
+  content?: { comment?: string; title?: string; content?: string };
 }): string {
   return idempotencyKeyFor("action", {
     action: action.action,
     postId: action.target?.postId,
+    submolt: action.target?.submolt,
     commentHash: action.content?.comment ? commentHash(action.content.comment) : undefined,
+    titleHash: action.content?.title ? commentHash(action.content.title) : undefined,
+    contentHash: action.content?.content ? commentHash(action.content.content) : undefined,
   });
 }

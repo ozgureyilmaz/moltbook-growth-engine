@@ -1,4 +1,4 @@
-import { parseActionPayload, type OutboxPayload } from "./payload";
+import { parseActionPayload, parsePublisherActionPayload, type OutboxPayload } from "./payload";
 import type { ActionSecurityOptions } from "../schemas";
 
 type JsonRecord = Record<string, unknown>;
@@ -12,6 +12,27 @@ export function serializeActionTransport(payload: OutboxPayload): JsonRecord {
       action: payload.action,
       reason: payload.reason,
       ...(payload.target ? { target: { post_id: payload.target.postId, ...(payload.target.postUrl ? { post_url: payload.target.postUrl } : {}) } } : {}),
+      metadata: { created_at: payload.metadata.createdAt, run_id: payload.metadata.runId },
+    };
+  }
+  if (payload.action === "POST") {
+    return {
+      schema_version: payload.schemaVersion,
+      action_id: payload.actionId,
+      action: payload.action,
+      platform: payload.platform,
+      target: { submolt: payload.target.submolt },
+      content: { title: payload.content.title, content: payload.content.content, type: payload.content.type },
+      decision: {
+        opportunity_score: payload.decision.opportunityScore,
+        evaluation_score: payload.decision.evaluationScore,
+        confidence: payload.decision.confidence,
+      },
+      experiment: {
+        experiment_id: payload.experiment.experimentId,
+        prompt_version: payload.experiment.promptVersion,
+        model_version: payload.experiment.modelVersion,
+      },
       metadata: { created_at: payload.metadata.createdAt, run_id: payload.metadata.runId },
     };
   }
@@ -60,6 +81,22 @@ export function parseActionTransport(value: unknown, options: ActionSecurityOpti
       action: "NO_ACTION",
       reason: raw.reason,
       ...(target?.post_id && target?.post_url ? { target: { postId: target.post_id, postUrl: target.post_url } } : {}),
+      metadata: { createdAt: metadata?.created_at, runId: metadata?.run_id },
+    }, options);
+  }
+  if (raw.action === "POST") {
+    const content = raw.content as JsonRecord | undefined;
+    const decision = raw.decision as JsonRecord | undefined;
+    const experiment = raw.experiment as JsonRecord | undefined;
+    return parsePublisherActionPayload({
+      schemaVersion: raw.schema_version,
+      actionId: raw.action_id,
+      action: raw.action,
+      platform: raw.platform,
+      target: { submolt: (raw.target as JsonRecord | undefined)?.submolt },
+      content: { title: content?.title, content: content?.content, type: content?.type },
+      decision: { opportunityScore: decision?.opportunity_score, evaluationScore: decision?.evaluation_score, confidence: decision?.confidence },
+      experiment: { experimentId: experiment?.experiment_id, promptVersion: experiment?.prompt_version, modelVersion: experiment?.model_version },
       metadata: { createdAt: metadata?.created_at, runId: metadata?.run_id },
     }, options);
   }

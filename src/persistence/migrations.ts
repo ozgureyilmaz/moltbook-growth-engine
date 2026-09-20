@@ -245,6 +245,38 @@ export const MIGRATIONS: readonly Migration[] = [
         ON tracking_distributions(run_id, source_post_id);
     `,
   },
+  {
+    version: 5,
+    name: "marx_feed_poll_queue",
+    sql: `
+      CREATE TABLE marx_feed_stream (
+        stream_id TEXT PRIMARY KEY,
+        initialized_at TEXT NOT NULL,
+        last_checked_at TEXT NOT NULL
+      );
+      CREATE TABLE marx_feed_queue (
+        feed_id TEXT PRIMARY KEY,
+        source_url TEXT NOT NULL,
+        published_at TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('baseline','pending','running','completed','review_required','skipped')),
+        claim_id TEXT,
+        run_id TEXT,
+        runner_pid INTEGER,
+        runner_host TEXT,
+        result_json TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_marx_feed_queue_status ON marx_feed_queue(status, published_at);
+      CREATE TABLE marx_feed_resolutions (
+        resolution_id TEXT PRIMARY KEY,
+        feed_id TEXT NOT NULL,
+        claim_id TEXT NOT NULL,
+        resolution TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        resolved_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 export function applyMigrations(db: SqliteDatabase, migrations: readonly Migration[] = MIGRATIONS): void {

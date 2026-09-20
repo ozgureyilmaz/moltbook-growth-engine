@@ -8,6 +8,7 @@
 import type * as SharedDomain from "../domain";
 import type * as SharedPersistence from "../persistence";
 import type { MarxOutcomeEvent, ModelRunRecord, Outcome, Publication, StrategyStatistics, TrackingDistribution } from "../schemas";
+import type { PostAction as SchemaPostAction } from "../schemas";
 
 export type DomainExports = typeof SharedDomain;
 export type PersistenceExports = typeof SharedPersistence;
@@ -68,6 +69,10 @@ export type DiscoveryRequest = {
   now?: string;
   includeSubmolts?: string[];
   excludeSubmolts?: string[];
+  /** Public Moltbook feed sort. `new` preserves the legacy discovery default. */
+  feed?: "new" | "realtime" | "top" | "discussed";
+  /** Moltbook UI time filter, for example the screenshot's `Today` view. */
+  timeWindow?: "day" | "week" | "month" | "all";
 };
 
 export type ScoreComponents = {
@@ -211,6 +216,9 @@ export type ActionPayload = {
   };
   metadata: { createdAt: string; runId: string };
 };
+
+export type PostActionPayload = SchemaPostAction;
+export type PublisherActionPayload = ActionPayload | PostActionPayload;
 
 export type NoActionDecision = {
   schemaVersion: "1.0";

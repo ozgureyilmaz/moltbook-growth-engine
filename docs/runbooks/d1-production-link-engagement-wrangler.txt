@@ -1,0 +1,20 @@
+# Run from /Users/0x79de/dev/marx-tracker with an authorized Wrangler session.
+# This command is read-only and runs the same link-engagement query against D1.
+
+npx wrangler d1 execute marx-tracker-db-prod --remote --env production --command "
+SELECT
+  d.ref,
+  'https://marx-tracker.marxx.workers.dev/r/' || d.ref AS tracking_url,
+  d.status,
+  d.source_url AS target_post,
+  d.action_id,
+  COUNT(e.id) AS total_redirects,
+  MIN(e.created_at) AS first_redirect_at,
+  MAX(e.created_at) AS last_redirect_at
+FROM distributions d
+LEFT JOIN attribution_events e
+  ON e.ref = d.ref
+ AND e.event_type = 'redirect_requested'
+GROUP BY d.ref, d.status, d.source_url, d.action_id
+ORDER BY total_redirects DESC, d.created_at DESC;
+"

@@ -25,9 +25,34 @@ function clean(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
-function quoteFor(reply: string): string {
+const TOPIC_STOP_WORDS = new Set([
+  "the", "and", "for", "with", "from", "this", "that", "one", "than", "said", "may", "are", "was", "were", "have", "has", "not", "but", "they", "their", "into", "while", "what", "would", "will", "more", "only", "over", "under", "about", "also", "just", "its", "our", "your", "how", "why", "all", "can", "could", "should",
+  "announces", "announcement", "announced", "agreement", "secure", "permanent", "control", "president", "united", "states", "america", "american", "deal", "says", "according", "full", "text", "statement", "statements", "official", "officials", "including", "already", "previously", "many", "much", "part", "area", "right", "rights", "following", "next", "week", "first", "around", "here", "there", "these", "those", "some", "such", "through", "between", "after", "before", "because", "during", "without", "against", "very", "been", "being", "where", "when", "which", "presence", "base", "take", "takes", "taken", "administration", "gives", "gave", "force", "news", "concerns", "concern", "new", "other", "remain", "remains", "large", "made", "making", "makes", "another", "still", "true", "danish", "state", "territory", "alliance", "alongside", "any", "back", "bans", "completely", "common",
+]);
+
+export function extractArticleTerms(value: string): string[] {
+  return value.toLowerCase().match(/[a-z][a-z0-9-]{2,}/g)?.filter((term) => !TOPIC_STOP_WORDS.has(term)) ?? [];
+}
+
+export function deriveArticleTopics(title: string, body: string): string[] {
+  const titleTerms = [...new Set(extractArticleTerms(title))];
+  const counts = new Map<string, number>();
+  for (const term of extractArticleTerms(body)) counts.set(term, (counts.get(term) ?? 0) + 1);
+  const bodyTerms = [...counts.keys()].sort((left, right) => {
+    const countDifference = (counts.get(right) ?? 0) - (counts.get(left) ?? 0);
+    return countDifference || left.localeCompare(right);
+  });
+  return [...new Set([...titleTerms, ...bodyTerms])].slice(0, 12);
+}
+
+function quoteFor(reply: string): string | undefined {
   const normalized = clean(reply);
-  return normalized.length <= 220 ? normalized : `${normalized.slice(0, 217).trimEnd()}…`;
+  if (normalized.length <= 220) return normalized;
+  const completeSentence = normalized
+    .match(/.+?(?:[.!?]+(?=\s+[A-Z0-9“'"(]|$)|$)/gu)
+    ?.map((sentence) => sentence.trim())
+    .find((sentence) => sentence.length <= 220);
+  return completeSentence;
 }
 
 function toReply(raw: RawMarxReply, sourceUrl: string): MarxAgentReply | undefined {
@@ -38,6 +63,7 @@ function toReply(raw: RawMarxReply, sourceUrl: string): MarxAgentReply | undefin
   const body = clean(raw.body ?? raw.content);
   if (!replyId || !agentId || !agentName || !body) return undefined;
   const createdAt = clean(raw.createdAt ?? raw.created_at);
+  const quote = quoteFor(body);
   return {
     replyId,
     agentId,
@@ -45,7 +71,7 @@ function toReply(raw: RawMarxReply, sourceUrl: string): MarxAgentReply | undefin
     body,
     sourceUrl,
     ...(createdAt ? { createdAt } : {}),
-    quote: quoteFor(body),
+    ...(quote ? { quote } : {}),
   };
 }
 
@@ -93,8 +119,7 @@ export async function fetchMarxArticle(sourceUrl: string, options: { timeoutMs?:
   const body = clean(value.body ?? value.content);
   if (!title || !body) throw new Error("Marx article response is missing title or body");
   const tickers = Array.isArray(value.tickers) ? value.tickers.map(clean).filter(Boolean) : [];
-  const topics = ["Federal Reserve", "inflation", "interest rates", "PCE", "macro markets", ...tickers]
-    .filter((item, index, all) => all.indexOf(item) === index);
+  const topics = [...new Set([...deriveArticleTopics(title, body), ...tickers.map((ticker) => ticker.toLowerCase())])];
   const createdAt = clean(value.createdAt ?? value.created_at);
   return MarxArticleSchema.parse({
     articleId,

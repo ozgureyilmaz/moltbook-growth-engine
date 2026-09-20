@@ -50,6 +50,27 @@ describe("MoltbookHttpClient", () => {
     expect(new Headers(calls[0]?.init?.headers).get("authorization")).toBe("Bearer secret-value");
   });
 
+  it.each(["realtime", "top", "discussed"] as const)("passes the %s feed and UI time window to the official API", async (feed) => {
+    const calls: string[] = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      calls.push(String(input));
+      return json({ success: true, posts: [rawPost], has_more: false });
+    }) as typeof fetch;
+    const client = new MoltbookHttpClient({
+      secretProvider: new EnvironmentSecretProvider(),
+      secretReference: { name: "unused-public-read-key" },
+      publicReadOnly: true,
+      fetch: fetchMock,
+    });
+
+    const page = await client.discoverPostPage({ feed, timeWindow: "day", limit: 1 });
+
+    expect(calls[0]).toContain(`sort=${feed}`);
+    expect(calls[0]).toContain("time=day");
+    expect(page.posts[0]).toEqual(expect.objectContaining({ metadata: expect.objectContaining({ feed, timeWindow: "day" }) }));
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("authorization")).toBeNull();
+  });
+
   it("maps post context and nested replies from official response shapes", async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => String(input).includes("/comments")
       ? json({ success: true, comments: [{

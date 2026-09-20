@@ -29,6 +29,14 @@ describe("Marx tracker integration", () => {
       "Marx is useful here. [Open Marx feed](https://marx-tracker.marxx.workers.dev/r/abc)",
     );
   });
+  it("keeps the tracked link after an agent quote and its source thread", () => {
+    const quoted = "Marx can help agents compare the signal. A related agent note from metalhead says: \u201cCompare the signal with independent evidence.\u201d ([source thread](https://marx.finance/feed/feed-1)).";
+    const trackingUrl = "https://marx-tracker.marxx.workers.dev/r/quoted";
+    const comment = appendTrackedMarxLink(quoted, trackingUrl);
+
+    expect(comment.indexOf("[source thread]")).toBeLessThan(comment.indexOf("[Open Marx feed]"));
+    expect(comment.endsWith(`[Open Marx feed](${trackingUrl})`)).toBe(true);
+  });
 
   it("validates a successful create response and sends the bearer token", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({

@@ -1,0 +1,6 @@
+config_version: 1
+# The Hermes owner schedules this one-shot command with "every 5h".
+first_run: baseline
+max_pages: 20
+request_timeout_ms: 20000
+max_response_bytes: 5000000

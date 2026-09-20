@@ -30,7 +30,7 @@ describe("SQLite persistence foundation", () => {
     applyMigrations(db);
     applyMigrations(db);
 
-    expect(db.versions).toEqual([1, 2, 3, 4]);
+    expect(db.versions).toEqual([1, 2, 3, 4, 5]);
     expect(db.executedSql.filter((sql) => sql.includes("CREATE TABLE IF NOT EXISTS runs"))).toHaveLength(1);
   });
 

@@ -31,6 +31,8 @@ const RawPostSchema = z.object({
   upvotes: z.number().int().nonnegative().optional(),
   downvotes: z.number().int().nonnegative().optional(),
   score: z.number().optional(),
+  last_comment_at: z.string().datetime({ offset: true }).optional(),
+  recent_comment_count: z.number().int().nonnegative().optional(),
   comment_count: z.number().int().nonnegative().optional(),
   relevance: z.number().optional(),
   is_deleted: z.boolean().optional(),
@@ -142,13 +144,15 @@ export class MoltbookHttpClient implements AuthorizedMoltbookClient {
 
   public async discoverPostPage(input: DiscoveryRequest = {}, cursor?: string): Promise<{ posts: unknown[]; nextCursor?: string }> {
     const url = this.endpoint("posts");
-    url.searchParams.set("sort", "new");
+    const feed = input.feed ?? "new";
+    url.searchParams.set("sort", feed);
     url.searchParams.set("limit", String(Math.min(100, Math.max(1, input.limit ?? 100))));
+    if (input.timeWindow) url.searchParams.set("time", input.timeWindow);
     if (cursor) url.searchParams.set("cursor", cursor);
     if (input.includeSubmolts?.length === 1) url.searchParams.set("submolt", input.includeSubmolts[0]!);
     const parsed = PostListResponseSchema.parse(await this.getJson(url));
     return {
-      posts: parsed.posts.filter((post) => !post.is_deleted && !post.is_spam).map((post) => this.toPost(post)),
+      posts: parsed.posts.filter((post) => !post.is_deleted && !post.is_spam).map((post) => this.toPost(post, feed, input.timeWindow)),
       ...(parsed.has_more && parsed.next_cursor ? { nextCursor: parsed.next_cursor } : {}),
     };
   }
@@ -235,7 +239,7 @@ export class MoltbookHttpClient implements AuthorizedMoltbookClient {
     return url;
   }
 
-  private toPost(raw: z.infer<typeof RawPostSchema>): MoltbookPost {
+  private toPost(raw: z.infer<typeof RawPostSchema>, feed = "new", timeWindow?: DiscoveryRequest["timeWindow"]): MoltbookPost {
     const fetchedAt = this.now().toISOString();
     const content = [raw.title?.trim(), raw.content?.trim()].filter(Boolean).join("\n\n");
     return {
@@ -249,6 +253,13 @@ export class MoltbookHttpClient implements AuthorizedMoltbookClient {
       engagement: { replies: raw.comment_count ?? 0, reactions: Math.max(0, (raw.upvotes ?? 0) - (raw.downvotes ?? 0)) },
       metadata: {
         source: "moltbook-official-api-v1",
+        feed,
+        ...(timeWindow ? { timeWindow } : {}),
+        ...(raw.score !== undefined ? { score: raw.score } : {}),
+        ...(raw.upvotes !== undefined ? { upvotes: raw.upvotes } : {}),
+        ...(raw.downvotes !== undefined ? { downvotes: raw.downvotes } : {}),
+        ...(raw.recent_comment_count !== undefined ? { recentCommentCount: raw.recent_comment_count } : {}),
+        ...(raw.last_comment_at !== undefined ? { lastCommentAt: raw.last_comment_at } : {}),
         postType: raw.type,
         verificationStatus: raw.verification_status,
         labels: raw.labels ?? [],

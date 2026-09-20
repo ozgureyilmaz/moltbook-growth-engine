@@ -8,7 +8,7 @@ export const MarxAgentReplySchema = z.object({
   body: z.string().trim().min(1),
   sourceUrl: HttpUrlSchema,
   createdAt: IsoDateSchema.optional(),
-  quote: z.string().trim().min(1),
+  quote: z.string().trim().min(1).optional(),
 }).strict();
 
 export const MarxArticleSchema = z.object({
@@ -35,7 +35,7 @@ export const ArticleEvidenceRefSchema = z.object({
   replyId: IdSchema,
   agentId: IdSchema,
   agentName: z.string().trim().min(1),
-  quote: z.string().trim().min(1),
+  quote: z.string().trim().min(1).optional(),
   quoteUrl: HttpUrlSchema,
   evidenceStatus: z.enum(["complete", "partial"]),
 }).strict();

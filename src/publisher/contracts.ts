@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { actionIdFor, commentHash, deterministicId, sha256, stableStringify } from "../domain/identifiers";
-import type { ActionPayload } from "../orchestrator/contracts";
-import { parseActionPayload } from "../outbox/payload";
+import { actionIdFor, commentHash, deterministicId, postActionIdFor, postBodyHash, sha256, stableStringify } from "../domain/identifiers";
+import type { PublisherActionPayload } from "../orchestrator/contracts";
+import { parsePublisherActionPayload } from "../outbox/payload";
 import { parseActionTransport, serializeActionTransport } from "../outbox/transport";
 import type { Publication } from "../schemas";
 
@@ -50,8 +50,8 @@ export const MoltbookActionRequestSchema = z.object({
 }).strict().superRefine((request, context) => {
   try {
     const action = parseActionTransport(request.action, { mode: "production", allowedDomains: ["www.moltbook.com"] });
-    if (action.action !== "COMMENT" || action.actionId !== request.actionId) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: "publisher request must contain the exact COMMENT action" });
+    if ((action.action !== "COMMENT" && action.action !== "POST") || action.actionId !== request.actionId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "publisher request must contain the exact COMMENT or POST action" });
     }
   } catch (error) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: `publisher request action is invalid: ${error instanceof Error ? error.message : String(error)}` });
@@ -76,7 +76,8 @@ export const MoltbookPublicationReceiptSchema = z.object({
   status: PublicationReceiptStatusSchema,
   evidenceStatus: z.enum(["verified", "unverified"]),
   publisherAccount: z.string().trim().min(1),
-  targetPostId: z.string().trim().min(1),
+  targetPostId: z.string().trim().min(1).optional(),
+  providerPostId: z.string().trim().min(1).optional(),
   providerCommentId: z.string().trim().min(1).optional(),
   permalink: z.string().url().optional(),
   publishedAt: z.string().datetime({ offset: true }).optional(),
@@ -89,7 +90,7 @@ export const MoltbookPublicationReceiptSchema = z.object({
 }).strict().superRefine((receipt, context) => {
   if (receipt.status === "PUBLISHED") {
     if (receipt.evidenceStatus !== "verified") context.addIssue({ code: z.ZodIssueCode.custom, message: "PUBLISHED receipt must have verified evidence" });
-    if (!receipt.providerCommentId || !receipt.permalink || !receipt.publishedAt) context.addIssue({ code: z.ZodIssueCode.custom, message: "PUBLISHED receipt requires providerCommentId, permalink, and publishedAt" });
+    if ((!receipt.providerCommentId && !receipt.providerPostId) || !receipt.permalink || !receipt.publishedAt) context.addIssue({ code: z.ZodIssueCode.custom, message: "PUBLISHED receipt requires a provider post/comment id, permalink, and publishedAt" });
   }
   if (receipt.status !== "PUBLISHED" && !receipt.errorCode) context.addIssue({ code: z.ZodIssueCode.custom, message: "Non-published receipt requires errorCode" });
 });
@@ -135,7 +136,7 @@ export function verifyAutonomousGrant(value: unknown, options: ContractVerificat
 }
 
 export function buildMoltbookActionRequest(input: {
-  action: ActionPayload;
+  action: PublisherActionPayload;
   grant: AutonomousGrant;
   publisherAccount: string;
   publisher: PublisherModel;
@@ -143,20 +144,23 @@ export function buildMoltbookActionRequest(input: {
   now?: Date;
 }): MoltbookActionRequest {
   const grant = AutonomousGrantSchema.parse(input.grant);
-  const validatedAction = parseActionPayload(input.action, { mode: "production", allowedDomains: ["www.moltbook.com"] });
-  if (validatedAction.action !== "COMMENT") throw new Error("Publisher request requires a COMMENT action");
+  const validatedAction = parsePublisherActionPayload(input.action, { mode: "production", allowedDomains: ["www.moltbook.com"] });
   const now = input.now ?? new Date();
   if (Date.parse(grant.issuedAt) > now.getTime() || Date.parse(grant.expiresAt) <= now.getTime()) throw new Error("Autonomous grant is not currently valid");
   if (grant.publisherAccount !== input.publisherAccount) throw new Error("Autonomous grant is bound to a different publisher account");
   if (!grant.allowedActionIds.includes(validatedAction.actionId)) throw new Error("Autonomous grant does not authorize this action");
-  const expectedActionId = actionIdFor(validatedAction.target.postId, validatedAction.content.comment, validatedAction.content.strategyFamily);
-  if (expectedActionId !== validatedAction.actionId) throw new Error("Action ID is not canonical for the exact target and comment");
+  const expectedActionId = validatedAction.action === "COMMENT"
+    ? actionIdFor(validatedAction.target.postId, validatedAction.content.comment, validatedAction.content.strategyFamily)
+    : postActionIdFor(validatedAction.target.submolt, validatedAction.content.title, validatedAction.content.content);
+  if (expectedActionId !== validatedAction.actionId) throw new Error("Action ID is not canonical for the exact target and content");
   const action = serializeActionTransport(validatedAction);
   const actionHash = sha256(stableStringify(action));
-  const contentHash = commentHash(validatedAction.content.comment);
-  const bodyHash = sha256(validatedAction.content.comment);
+  const contentHash = validatedAction.action === "COMMENT" ? commentHash(validatedAction.content.comment) : postBodyHash(validatedAction.content.title, validatedAction.content.content);
+  const bodyHash = validatedAction.action === "COMMENT"
+    ? sha256(validatedAction.content.comment)
+    : sha256(`${validatedAction.content.title}\n\n${validatedAction.content.content}`);
   const targetHash = sha256(stableStringify(action.target));
-  const idempotencyKey = `moltbook:comment:v1:${validatedAction.actionId}`;
+  const idempotencyKey = `moltbook:${validatedAction.action === "COMMENT" ? "comment" : "post"}:v1:${validatedAction.actionId}`;
   const createdAt = input.createdAt ?? now.toISOString();
   const requestId = deterministicId("pubreq", { actionId: validatedAction.actionId, grantId: grant.grantId, actionHash });
   const material = {
@@ -194,15 +198,23 @@ export function verifyMoltbookPublicationReceipt(value: unknown, requestValue: u
   delete requestMaterial.requestHash;
   if (sha256(stableStringify(requestMaterial)) !== request.requestHash) throw new Error("Publisher request hash is invalid");
   const parsedAction = parseActionTransport(request.action, { mode: "production", allowedDomains: ["www.moltbook.com"] });
-  if (parsedAction.action === "NO_ACTION" || parsedAction.actionId !== request.actionId) throw new Error("Publisher request does not contain the exact COMMENT action");
-  if (actionIdFor(parsedAction.target.postId, parsedAction.content.comment, parsedAction.content.strategyFamily) !== parsedAction.actionId) throw new Error("Publisher request action ID is not canonical");
+  if (parsedAction.action === "NO_ACTION" || parsedAction.actionId !== request.actionId) throw new Error("Publisher request does not contain the exact COMMENT or POST action");
+  const canonicalActionId = parsedAction.action === "COMMENT"
+    ? actionIdFor(parsedAction.target.postId, parsedAction.content.comment, parsedAction.content.strategyFamily)
+    : postActionIdFor(parsedAction.target.submolt, parsedAction.content.title, parsedAction.content.content);
+  if (canonicalActionId !== parsedAction.actionId) throw new Error("Publisher request action ID is not canonical");
   if (sha256(stableStringify(request.action)) !== request.actionHash) throw new Error("Publisher request action hash is invalid");
-  if (commentHash(parsedAction.content.comment) !== request.contentHash || sha256(parsedAction.content.comment) !== request.bodyHash) throw new Error("Publisher request body hash is invalid");
+  const expectedContentHash = parsedAction.action === "COMMENT" ? commentHash(parsedAction.content.comment) : postBodyHash(parsedAction.content.title, parsedAction.content.content);
+  const expectedBodyHash = parsedAction.action === "COMMENT" ? sha256(parsedAction.content.comment) : sha256(`${parsedAction.content.title}\n\n${parsedAction.content.content}`);
+  if (expectedContentHash !== request.contentHash || expectedBodyHash !== request.bodyHash) throw new Error("Publisher request body hash is invalid");
   if (receipt.requestId !== request.requestId || receipt.requestHash !== request.requestHash) throw new Error("Receipt is not bound to the publisher request");
   if (receipt.actionId !== request.actionId || receipt.actionHash !== request.actionHash || receipt.idempotencyKey !== request.idempotencyKey || receipt.contentHash !== request.contentHash || receipt.bodyHash !== request.bodyHash || receipt.targetHash !== request.targetHash) throw new Error("Receipt action, target, or content hash does not match");
   if (receipt.publisherAccount !== request.publisherAccount || receipt.publisherAccount !== request.grant.publisherAccount) throw new Error("Receipt publisher account does not match its grant");
   const target = request.action.target as Record<string, unknown> | undefined;
-  if (receipt.targetPostId !== target?.post_id) throw new Error("Receipt target post does not match the action target");
+  if (parsedAction.action === "COMMENT" && receipt.targetPostId !== target?.post_id) throw new Error("Receipt target post does not match the action target");
+  if (parsedAction.action === "POST" && receipt.targetPostId !== undefined) throw new Error("POST receipt must not claim a pre-existing target post");
+  if (receipt.status === "PUBLISHED" && parsedAction.action === "COMMENT" && !receipt.providerCommentId) throw new Error("PUBLISHED COMMENT receipt is missing providerCommentId");
+  if (receipt.status === "PUBLISHED" && parsedAction.action === "POST" && !receipt.providerPostId) throw new Error("PUBLISHED POST receipt is missing providerPostId");
   if (sha256(stableStringify(target)) !== request.targetHash) throw new Error("Publisher request target hash is invalid");
   if (receipt.receiptHash !== sha256(stableStringify({ ...receipt, receiptHash: undefined }))) throw new Error("Publication receipt hash is invalid");
   if (receipt.status === "PUBLISHED") assertOfficialPermalink(receipt.permalink!);
@@ -225,7 +237,8 @@ export function verifyMoltbookPublicationReceipt(value: unknown, requestValue: u
       bodyHash: receipt.bodyHash,
       targetHash: receipt.targetHash,
       publisherAccount: receipt.publisherAccount,
-      targetPostId: receipt.targetPostId,
+      targetPostId: receipt.providerPostId ?? receipt.targetPostId,
+      providerPostId: receipt.providerPostId,
       providerCommentId: receipt.providerCommentId,
       permalink: receipt.permalink,
       observedAt: receipt.observedAt,
